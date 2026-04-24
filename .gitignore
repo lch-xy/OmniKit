@@ -1,0 +1,56 @@
+# macOS 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode 用户数据（必须忽略）
+xcuserdata/
+*.xcuserstate
+
+# Xcode 构建缓存（必须忽略）
+build/
+.DerivedData/
+
+# Xcode workspace 用户文件
+*.xcworkspace/xcuserdata/
+
+# Swift Package Manager
+.build/
+Packages/
+Package.resolved
+
+# CocoaPods
+Pods/
+Podfile.lock
+
+# Carthage
+Carthage/Build/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/
+fastlane/test_output/
+
+# Archives
+*.xcarchive
+
+# Playground
+timeline.xctimeline
+playground.xcworkspace
+
+# Logs
+*.log
+
+# 临时文件
+*.swp
+*.tmp
+*.lock
+
+# 编译产物
+*.o
+*.out
+*.app
+
+# 环境变量（如果有）
+.env

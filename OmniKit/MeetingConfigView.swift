@@ -1,0 +1,327 @@
+//
+//  MeetingConfigView.swift
+//  OmniKit
+//
+
+import SwiftUI
+
+struct MeetingConfigView: View {
+    @EnvironmentObject private var meetingManager: MeetingManager
+    @State private var presentedRecordID: MeetingRecord.ID?
+    @State private var renamingRecordID: MeetingRecord.ID?
+    @State private var draftRecordTitle = ""
+    @State private var currentPage = 1
+    private let pageSize = 10
+
+    var body: some View {
+        SettingsCanvas {
+            SettingsHeroCard(
+                title: "会议录音",
+                subtitle: "记录会议语音、实时转写并保留完整音频文件。可配置主要和次要识别语言，命名、查看文本和回放都集中在这里完成。"
+            ) {
+                HStack(spacing: 12) {
+                    Button {
+                        meetingManager.openRecordingsFolder()
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.bordered)
+                    .help("打开录音文件夹")
+
+                    Button(meetingManager.isRecording ? "结束录音" : "开始录音") {
+                        if meetingManager.isRecording {
+                            meetingManager.stopRecording()
+                        } else {
+                            meetingManager.startRecording()
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(meetingManager.isRecording ? .red : .accentColor)
+                }
+            }
+
+            SettingsSection(title: "识别语言") {
+                SettingsRow("主要语言", systemImage: "1.circle", description: "优先使用的识别语言") {
+                    Picker("", selection: primaryRecognitionLanguageBinding) {
+                        ForEach(RecognitionLanguageOption.allCases) { language in
+                            Text(language.title).tag(language)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+
+                SettingsDivider()
+
+                SettingsRow("次要语言", systemImage: "2.circle", description: "主语言不匹配时用于兜底识别") {
+                    Picker("", selection: secondaryRecognitionLanguageBinding) {
+                        ForEach(RecognitionLanguageOption.allCases) { language in
+                            Text(language.title).tag(language)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+            }
+
+            SettingsSection(title: "实时状态") {
+                SettingsRow("录音状态", systemImage: "waveform.and.mic", description: meetingManager.statusMessage) {
+                    if meetingManager.isRecording {
+                        SettingsInfoBadge(text: "正在录音", tint: .red)
+                    } else {
+                        SettingsInfoBadge(text: "就绪", tint: .secondary)
+                    }
+                }
+            }
+
+            SettingsSection(title: "录音历史") {
+                if meetingManager.records.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "waveform.badge.mic")
+                            .font(.system(size: 24))
+                            .foregroundStyle(.tertiary)
+                        Text("暂无录音记录")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(pagedRecords.enumerated()), id: \.element.id) { index, record in
+                            recordRow(record)
+                            if index < pagedRecords.count - 1 {
+                                SettingsDivider()
+                            }
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    HStack {
+                        Button {
+                            currentPage = max(1, currentPage - 1)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .disabled(currentPage <= 1)
+                        .buttonStyle(.plain)
+
+                        Spacer()
+                        Text("\(currentPage) / \(totalPages)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+
+                        Button {
+                            currentPage = min(totalPages, currentPage + 1)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .disabled(currentPage >= totalPages)
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .onDisappear {
+            if meetingManager.isRecording {
+                meetingManager.stopRecording()
+            }
+        }
+        .onAppear {
+            adjustCurrentPageIfNeeded()
+        }
+        .onChange(of: meetingManager.records.count) { _, _ in
+            adjustCurrentPageIfNeeded()
+        }
+        .sheet(isPresented: presentedTranscriptBinding) {
+            transcriptSheet
+        }
+        .sheet(isPresented: renamingRecordBinding) {
+            renameSheet
+        }
+    }
+
+    private func recordRow(_ record: MeetingRecord) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if record.id == meetingManager.records.first?.id && meetingManager.isRecording {
+                        Circle()
+                            .fill(.red)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(record.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                }
+                Text(record.startedAt.formatted(date: .numeric, time: .shortened))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: 14) {
+                Button { meetingManager.playRecord(record.id) } label: {
+                    Image(systemName: playbackIcon(for: record.id))
+                }
+                .help(playbackHelpText(for: record.id))
+
+                Button { presentedRecordID = record.id } label: {
+                    Image(systemName: "text.alignleft")
+                }
+                .help("查看文本")
+
+                Button { beginRenaming(record) } label: {
+                    Image(systemName: "pencil")
+                }
+                .help("重命名")
+
+                Button(role: .destructive) { meetingManager.deleteRecord(record.id) } label: {
+                    Image(systemName: "trash")
+                }
+                .foregroundStyle(.red.opacity(0.8))
+                .help("删除")
+            }
+            .font(.system(size: 13))
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var totalPages: Int {
+        max(1, Int(ceil(Double(meetingManager.records.count) / Double(pageSize))))
+    }
+
+    private var pagedRecords: [MeetingRecord] {
+        let start = (currentPage - 1) * pageSize
+        guard start < meetingManager.records.count else { return [] }
+        let end = min(start + pageSize, meetingManager.records.count)
+        return Array(meetingManager.records[start..<end])
+    }
+
+    private func adjustCurrentPageIfNeeded() {
+        currentPage = min(max(1, currentPage), totalPages)
+    }
+
+    private func playbackIcon(for id: MeetingRecord.ID) -> String {
+        if meetingManager.playingRecordID == id && !meetingManager.isPlaybackPaused {
+            return "pause.circle"
+        }
+        return "play.circle"
+    }
+
+    private func playbackHelpText(for id: MeetingRecord.ID) -> String {
+        if meetingManager.playingRecordID == id && !meetingManager.isPlaybackPaused {
+            return "暂停"
+        }
+        return "播放"
+    }
+
+    private var primaryRecognitionLanguageBinding: Binding<RecognitionLanguageOption> {
+        Binding(
+            get: { meetingManager.primaryRecognitionLanguage },
+            set: { meetingManager.setPrimaryRecognitionLanguage($0) }
+        )
+    }
+
+    private var secondaryRecognitionLanguageBinding: Binding<RecognitionLanguageOption> {
+        Binding(
+            get: { meetingManager.secondaryRecognitionLanguage },
+            set: { meetingManager.setSecondaryRecognitionLanguage($0) }
+        )
+    }
+
+    private var transcriptSheet: some View {
+        TranscriptSheet(recordID: presentedRecordID) {
+            presentedRecordID = nil
+        }
+        .environmentObject(meetingManager)
+    }
+
+    private var renameSheet: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("修改会议记录名称")
+                    .font(.system(size: 13, weight: .semibold))
+                TextField("名称", text: $draftRecordTitle)
+                    .textFieldStyle(.roundedBorder)
+                Spacer()
+            }
+            .padding(24)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { cancelRenaming() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") { saveRenaming() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        }
+        .frame(width: 360, height: 180)
+    }
+
+    private var presentedTranscriptBinding: Binding<Bool> {
+        Binding(get: { presentedRecordID != nil }, set: { if !$0 { presentedRecordID = nil } })
+    }
+
+    private var renamingRecordBinding: Binding<Bool> {
+        Binding(get: { renamingRecordID != nil }, set: { if !$0 { cancelRenaming() } })
+    }
+
+    private func beginRenaming(_ record: MeetingRecord) {
+        renamingRecordID = record.id
+        draftRecordTitle = record.title
+    }
+
+    private func cancelRenaming() {
+        renamingRecordID = nil
+        draftRecordTitle = ""
+    }
+
+    private func saveRenaming() {
+        if let id = renamingRecordID {
+            meetingManager.renameRecord(id, to: draftRecordTitle)
+        }
+        cancelRenaming()
+    }
+}
+
+private struct TranscriptSheet: View {
+    @EnvironmentObject private var meetingManager: MeetingManager
+    let recordID: MeetingRecord.ID?
+    let onClose: () -> Void
+
+    private var record: MeetingRecord? {
+        guard let id = recordID else { return nil }
+        return meetingManager.record(for: id)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(record?.transcript ?? "暂无内容")
+                        .font(.system(size: 13))
+                        .lineSpacing(6)
+                        .textSelection(.enabled)
+                }
+                .padding(24)
+            }
+            .navigationTitle(record?.title ?? "转写结果")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { onClose() }
+                }
+            }
+        }
+        .frame(minWidth: 500, minHeight: 400)
+    }
+}
