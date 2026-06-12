@@ -120,8 +120,8 @@ final class TranslatorPanelManager: ObservableObject {
                     viewModel: viewModel,
                     pinState: pinState,
                     closeAction: { [weak newPanel] in newPanel?.close() },
-                    minimizeAction: { [weak newPanel] in newPanel?.performMiniaturize(nil) },
-                    zoomAction: { [weak newPanel] in newPanel?.performZoom(nil) },
+                    minimizeAction: { [weak newPanel] in newPanel?.omniKitMiniaturize() },
+                    zoomAction: { [weak newPanel] in newPanel?.omniKitToggleZoom() },
                     togglePinAction: { [weak self, weak newPanel] in
                         guard let self else { return }
                         self.pinState.isPinned.toggle()
@@ -594,9 +594,17 @@ private struct TranslatorQuickPanelView: View {
 
     private func languageMenu<T: LanguageOptionProtocol>(selection: Binding<T>, options: [T]) -> some View {
         Menu {
-            Picker("", selection: selection) {
-                ForEach(options, id: \.self) { option in
-                    Text(option.title).tag(option)
+            ForEach(options, id: \.self) { option in
+                Button {
+                    selection.wrappedValue = option
+                } label: {
+                    HStack {
+                        Text(option.title)
+                        Spacer()
+                        if selection.wrappedValue == option {
+                            Image(systemName: "checkmark")
+                        }
+                    }
                 }
             }
         } label: {

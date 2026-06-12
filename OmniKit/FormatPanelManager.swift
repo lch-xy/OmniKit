@@ -152,8 +152,8 @@ final class FormatPanelManager: ObservableObject {
                     viewModel: vm,
                     pinState: pinState,
                     closeAction: { [weak newPanel] in newPanel?.close() },
-                    minimizeAction: { [weak newPanel] in newPanel?.performMiniaturize(nil) },
-                    zoomAction: { [weak newPanel] in newPanel?.performZoom(nil) },
+                    minimizeAction: { [weak newPanel] in newPanel?.omniKitMiniaturize() },
+                    zoomAction: { [weak newPanel] in newPanel?.omniKitToggleZoom() },
                     togglePinAction: { [weak self, weak newPanel] in
                         guard let self else { return }
                         self.pinState.isPinned.toggle()
