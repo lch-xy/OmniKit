@@ -16,6 +16,7 @@ struct MenuBarControlView: View {
     @EnvironmentObject private var ocrManager: OCRManager
     @EnvironmentObject private var meetingManager: MeetingManager
     @EnvironmentObject private var formatPanelManager: FormatPanelManager
+    @EnvironmentObject private var textDiffPanelManager: TextDiffPanelManager
     @EnvironmentObject private var imagePanelManager: ImagePanelManager
     @EnvironmentObject private var clipboardPanelManager: ClipboardPanelManager
     @EnvironmentObject private var batteryManager: BatteryManager
@@ -47,6 +48,12 @@ struct MenuBarControlView: View {
                     formatPanelManager.presentPanel()
                 } label: {
                     Label("格式转换", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                }
+
+                Button {
+                    textDiffPanelManager.presentPanel()
+                } label: {
+                    Label("文本比对", systemImage: "rectangle.split.2x1")
                 }
 
                 Button {

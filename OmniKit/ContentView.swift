@@ -14,6 +14,8 @@ struct ContentView: View {
     @EnvironmentObject private var meetingManager: MeetingManager
     @EnvironmentObject private var formatSettings: FormatSettingsStore
     @EnvironmentObject private var formatPanelManager: FormatPanelManager
+    @EnvironmentObject private var textDiffSettings: TextDiffSettingsStore
+    @EnvironmentObject private var textDiffPanelManager: TextDiffPanelManager
     @EnvironmentObject private var imageSettings: ImageSettingsStore
     @EnvironmentObject private var imagePanelManager: ImagePanelManager
     @EnvironmentObject private var clipboardSettings: ClipboardSettingsStore
@@ -70,6 +72,10 @@ struct ContentView: View {
             FormatConfigView()
                 .environmentObject(formatSettings)
                 .environmentObject(formatPanelManager)
+        case .textDiff:
+            TextDiffConfigView()
+                .environmentObject(textDiffSettings)
+                .environmentObject(textDiffPanelManager)
         case .image:
             ImageConfigView()
                 .environmentObject(imageSettings)
@@ -110,6 +116,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
     case ocr
     case meeting
     case format
+    case textDiff
     case image
     case clipboard
     case battery
@@ -122,6 +129,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
         case .ocr: return "OCR"
         case .meeting: return "会议"
         case .format: return "格式转换"
+        case .textDiff: return "文本比对"
         case .image: return "图片"
         case .clipboard: return "剪贴板"
         case .battery: return "电池"
@@ -134,6 +142,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
         case .ocr: return "text.viewfinder"
         case .meeting: return "person.2.wave.2"
         case .format: return "arrow.trianglehead.2.clockwise.rotate.90"
+        case .textDiff: return "rectangle.split.2x1"
         case .image: return "photo.on.rectangle.angled"
         case .clipboard: return "doc.on.clipboard"
         case .battery: return "battery.100percent"
@@ -146,6 +155,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
     let translationSettings = TranslationSettingsStore()
     let ocrSettings = OCRSettingsStore()
     let formatSettings = FormatSettingsStore()
+    let textDiffSettings = TextDiffSettingsStore()
     let imageSettings = ImageSettingsStore()
     let clipboardSettings = ClipboardSettingsStore()
     let batteryManager = BatteryManager()
@@ -159,6 +169,8 @@ private enum SettingsModule: CaseIterable, Identifiable {
         .environmentObject(MeetingManager())
         .environmentObject(formatSettings)
         .environmentObject(FormatPanelManager(settings: formatSettings))
+        .environmentObject(textDiffSettings)
+        .environmentObject(TextDiffPanelManager(settings: textDiffSettings))
         .environmentObject(imageSettings)
         .environmentObject(ImagePanelManager(settings: imageSettings))
         .environmentObject(clipboardSettings)

@@ -13,12 +13,14 @@ struct OmniKitApp: App {
     @StateObject private var translationSettings = TranslationSettingsStore()
     @StateObject private var ocrSettings = OCRSettingsStore()
     @StateObject private var formatSettings = FormatSettingsStore()
+    @StateObject private var textDiffSettings = TextDiffSettingsStore()
     @StateObject private var imageSettings = ImageSettingsStore()
     @StateObject private var clipboardSettings = ClipboardSettingsStore()
     @StateObject private var translatorPanelManager: TranslatorPanelManager
     @StateObject private var ocrManager: OCRManager
     @StateObject private var meetingManager = MeetingManager()
     @StateObject private var formatPanelManager: FormatPanelManager
+    @StateObject private var textDiffPanelManager: TextDiffPanelManager
     @StateObject private var imagePanelManager: ImagePanelManager
     @StateObject private var clipboardPanelManager: ClipboardPanelManager
     @StateObject private var batteryManager = BatteryManager()
@@ -30,16 +32,19 @@ struct OmniKitApp: App {
         let translationSettings = TranslationSettingsStore()
         let ocrSettings = OCRSettingsStore()
         let formatSettings = FormatSettingsStore()
+        let textDiffSettings = TextDiffSettingsStore()
         let imageSettings = ImageSettingsStore()
         let clipboardSettings = ClipboardSettingsStore()
         _translationSettings = StateObject(wrappedValue: translationSettings)
         _ocrSettings = StateObject(wrappedValue: ocrSettings)
         _formatSettings = StateObject(wrappedValue: formatSettings)
+        _textDiffSettings = StateObject(wrappedValue: textDiffSettings)
         _imageSettings = StateObject(wrappedValue: imageSettings)
         _clipboardSettings = StateObject(wrappedValue: clipboardSettings)
         _translatorPanelManager = StateObject(wrappedValue: TranslatorPanelManager(settings: translationSettings))
         _ocrManager = StateObject(wrappedValue: OCRManager(settings: ocrSettings))
         _formatPanelManager = StateObject(wrappedValue: FormatPanelManager(settings: formatSettings))
+        _textDiffPanelManager = StateObject(wrappedValue: TextDiffPanelManager(settings: textDiffSettings))
         _imagePanelManager = StateObject(wrappedValue: ImagePanelManager(settings: imageSettings))
         _clipboardPanelManager = StateObject(wrappedValue: ClipboardPanelManager(settings: clipboardSettings))
     }
@@ -71,6 +76,8 @@ struct OmniKitApp: App {
                 .environmentObject(meetingManager)
                 .environmentObject(formatSettings)
                 .environmentObject(formatPanelManager)
+                .environmentObject(textDiffSettings)
+                .environmentObject(textDiffPanelManager)
                 .environmentObject(imageSettings)
                 .environmentObject(imagePanelManager)
                 .environmentObject(clipboardSettings)
@@ -85,6 +92,7 @@ struct OmniKitApp: App {
                 .environmentObject(ocrManager)
                 .environmentObject(meetingManager)
                 .environmentObject(formatPanelManager)
+                .environmentObject(textDiffPanelManager)
                 .environmentObject(imagePanelManager)
                 .environmentObject(clipboardPanelManager)
                 .environmentObject(batteryManager)
