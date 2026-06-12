@@ -15,7 +15,8 @@ macOS 菜单栏效率工具箱，把翻译、OCR、会议转写、格式工具�
 - **翻译**：接入阿里云机器翻译，支持输入翻译与划词翻译，带系统级浮窗入口。
 - **OCR**：截图后结合 Apple Vision 识别文字，结果可写入剪贴板。
 - **会议**：录音、实时转写、记录管理与回放，便于整理语音内容。
-- **格式工具**：JSON 提取与格式化、UUID / 身份证号生成、文本加解密等快捷弹窗。
+- **格式工具**：JSON 提取与格式化、UUID / 身份证号生成、Base64 / URL / 转义 / Unicode 等文本处理快捷弹窗。
+- **文本比对**：对比两段文本差异，快速查看新增、删除与变更内容。
 - **图片**：压缩、格式转换、翻转等轻量处理。
 - **剪贴板**：记录文本、代码、图片与文件复制历史，支持搜索、筛选、固定与快速回贴。
 - **电池**：状态、健康、循环次数展示；充电上限与相关检测（视硬件与系统而定）。
@@ -47,7 +48,7 @@ macOS 菜单栏效率工具箱，把翻译、OCR、会议转写、格式工具�
 **日常用法**
 
 - **主窗口**：侧边栏选择模块，统一管理各功能配置与快捷键。  
-- **本应用的菜单栏图标**：点击可快速打开翻译、OCR、格式工具、图片、剪贴板、会议等，无需先切到主窗口。  
+- **本应用的菜单栏图标**：点击可快速打开翻译、OCR、格式工具、文本比对、图片、剪贴板、会议等，无需先切到主窗口。  
 - **「图标」模块**：专门用来收纳或隐藏*其他 App* 留在菜单栏里的图标，与上一项不是同一回事。  
 - 各模块的快捷键可在对应设置页中自定义。
 
@@ -64,7 +65,8 @@ A macOS menu bar productivity app that bundles translation, OCR, meeting transcr
 - **Translation**: Alibaba Cloud Machine Translation, input and selection-based translation with floating panels.
 - **OCR**: Screenshot plus Apple Vision; copy recognized text to the clipboard.
 - **Meeting**: Recording, live transcription, record management, and playback.
-- **Format tools**: JSON extract/format, UUID / ID generation, text encrypt/decrypt, and similar quick panels.
+- **Format tools**: JSON extract/format, UUID / ID generation, Base64 / URL / escape / Unicode text processing, and similar quick panels.
+- **Text diff**: Compare two text snippets and quickly inspect additions, deletions, and changed content.
 - **Image**: Compression, format conversion, flip, and other lightweight edits.
 - **Clipboard**: History for text, code, images, and files—search, filter, pin, and paste back quickly.
 - **Battery**: Status, health, cycle count; charge limit and related checks (hardware and OS dependent).
@@ -96,7 +98,7 @@ For **translation**, set Alibaba Cloud Machine Translation `AccessKey ID` and `A
 **Day-to-day**
 
 - **Main window**: pick a module in the sidebar to configure features and shortcuts.  
-- **OmniKit’s own menu bar item**: quick access to translation, OCR, format tools, image tools, clipboard, meetings, etc., without bringing the main window to the front.  
+- **OmniKit’s own menu bar item**: quick access to translation, OCR, format tools, text diff, image tools, clipboard, meetings, etc., without bringing the main window to the front.  
 - **The “Icons” module**: for folding/hiding *other apps’* menu bar icons—separate from the item above.  
 - Customize shortcuts per module in its settings page.
 

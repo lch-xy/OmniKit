@@ -60,6 +60,8 @@ enum CryptoAlgorithmType: String, CaseIterable, Identifiable {
     case base64
     case md5
     case urlPercent
+    case escape
+    case unicode
 
     var id: String { rawValue }
     var title: String {
@@ -70,6 +72,10 @@ enum CryptoAlgorithmType: String, CaseIterable, Identifiable {
             return "MD5"
         case .urlPercent:
             return "URL"
+        case .escape:
+            return "转义"
+        case .unicode:
+            return "Unicode"
         }
     }
 }
@@ -206,11 +212,11 @@ final class FormatPanelViewModel: ObservableObject {
     var availableCryptoAlgorithms: [CryptoAlgorithmType] {
         switch selectedType {
         case .encrypt:
-            return [.base64, .md5, .urlPercent]
+            return [.base64, .md5, .urlPercent, .escape, .unicode]
         case .decrypt:
-            return [.base64, .urlPercent]
+            return [.base64, .urlPercent, .escape, .unicode]
         default:
-            return [.base64, .md5, .urlPercent]
+            return [.base64, .md5, .urlPercent, .escape, .unicode]
         }
     }
 
@@ -223,9 +229,9 @@ final class FormatPanelViewModel: ObservableObject {
         case .chineseIDCard:
             return "无需输入，点击执行后随机生成 5 个合法校验位的 18 位身份证号。"
         case .encrypt:
-            return "输入原文后点击执行，支持 Base64、MD5、URL 编码。"
+            return "输入原文后点击执行，支持 Base64、MD5、URL、转义和 Unicode 编码。"
         case .decrypt:
-            return "输入密文后点击执行，支持 Base64、URL 解码。MD5 不可逆，不支持解密。"
+            return "输入密文后点击执行，支持 Base64、URL、转义和 Unicode 解码。MD5 不可逆，不支持解密。"
         }
     }
 
@@ -441,6 +447,14 @@ final class FormatPanelViewModel: ObservableObject {
                 throw ConversionError.invalidURLText
             }
             return decoded
+        case (.encrypt, .escape):
+            return escapeText(content)
+        case (.decrypt, .escape):
+            return try unescapeText(content)
+        case (.encrypt, .unicode):
+            return unicodeEscapeText(content)
+        case (.decrypt, .unicode):
+            return try decodeUnicodeEscapes(content)
         default:
             throw ConversionError.unsupportedConversion
         }
@@ -451,6 +465,157 @@ final class FormatPanelViewModel: ObservableObject {
         if !availableCryptoAlgorithms.contains(selectedCryptoAlgorithm) {
             selectedCryptoAlgorithm = availableCryptoAlgorithms.first ?? .base64
         }
+    }
+
+    private func escapeText(_ content: String) -> String {
+        var output = ""
+        for character in content {
+            switch character {
+            case "\\":
+                output += "\\\\"
+            case "\"":
+                output += "\\\""
+            case "\n":
+                output += "\\n"
+            case "\r":
+                output += "\\r"
+            case "\t":
+                output += "\\t"
+            case "\u{08}":
+                output += "\\b"
+            case "\u{0C}":
+                output += "\\f"
+            default:
+                output.append(character)
+            }
+        }
+        return output
+    }
+
+    private func unescapeText(_ content: String) throws -> String {
+        try decodeEscapedText(content, decodeUnicode: true)
+    }
+
+    private func unicodeEscapeText(_ content: String) -> String {
+        content.utf16
+            .map { String(format: "\\u%04X", $0) }
+            .joined()
+    }
+
+    private func decodeUnicodeEscapes(_ content: String) throws -> String {
+        try decodeEscapedText(content, decodeUnicode: true, onlyUnicodeEscapes: true)
+    }
+
+    private func decodeEscapedText(
+        _ content: String,
+        decodeUnicode: Bool,
+        onlyUnicodeEscapes: Bool = false
+    ) throws -> String {
+        let characters = Array(content)
+        var output = ""
+        var index = 0
+
+        while index < characters.count {
+            let character = characters[index]
+            guard character == "\\" else {
+                output.append(character)
+                index += 1
+                continue
+            }
+
+            let nextIndex = index + 1
+            guard nextIndex < characters.count else {
+                throw ConversionError.invalidEscapedText
+            }
+
+            let marker = characters[nextIndex]
+            if decodeUnicode, marker == "u" {
+                let scalar = try parseUnicodeEscape(in: characters, startIndex: index)
+                output.append(String(scalar.value))
+                index = scalar.nextIndex
+                continue
+            }
+
+            if onlyUnicodeEscapes {
+                output.append(character)
+                index += 1
+                continue
+            }
+
+            switch marker {
+            case "\\":
+                output += "\\"
+            case "\"":
+                output += "\""
+            case "/":
+                output += "/"
+            case "n":
+                output += "\n"
+            case "r":
+                output += "\r"
+            case "t":
+                output += "\t"
+            case "b":
+                output += "\u{08}"
+            case "f":
+                output += "\u{0C}"
+            default:
+                throw ConversionError.invalidEscapedText
+            }
+            index += 2
+        }
+
+        return output
+    }
+
+    private func parseUnicodeEscape(
+        in characters: [Character],
+        startIndex: Int
+    ) throws -> (value: Unicode.Scalar, nextIndex: Int) {
+        let codeUnit = try parseUnicodeCodeUnit(in: characters, startIndex: startIndex)
+        var nextIndex = startIndex + 6
+
+        if (0xD800...0xDBFF).contains(codeUnit) {
+            guard nextIndex + 5 < characters.count,
+                  characters[nextIndex] == "\\",
+                  characters[nextIndex + 1] == "u" else {
+                throw ConversionError.invalidUnicodeText
+            }
+
+            let lowSurrogate = try parseUnicodeCodeUnit(in: characters, startIndex: nextIndex)
+            guard (0xDC00...0xDFFF).contains(lowSurrogate) else {
+                throw ConversionError.invalidUnicodeText
+            }
+
+            let highValue = UInt32(codeUnit - 0xD800)
+            let lowValue = UInt32(lowSurrogate - 0xDC00)
+            let scalarValue = 0x10000 + ((highValue << 10) | lowValue)
+            guard let scalar = Unicode.Scalar(scalarValue) else {
+                throw ConversionError.invalidUnicodeText
+            }
+            nextIndex += 6
+            return (scalar, nextIndex)
+        }
+
+        guard !(0xDC00...0xDFFF).contains(codeUnit),
+              let scalar = Unicode.Scalar(UInt32(codeUnit)) else {
+            throw ConversionError.invalidUnicodeText
+        }
+        return (scalar, nextIndex)
+    }
+
+    private func parseUnicodeCodeUnit(in characters: [Character], startIndex: Int) throws -> UInt16 {
+        guard startIndex + 5 < characters.count,
+              characters[startIndex] == "\\",
+              characters[startIndex + 1] == "u" else {
+            throw ConversionError.invalidUnicodeText
+        }
+
+        let hex = String(characters[(startIndex + 2)...(startIndex + 5)])
+        guard let value = UInt16(hex, radix: 16) else {
+            throw ConversionError.invalidUnicodeText
+        }
+        return value
     }
 
     private func generateChineseResidentID() -> String {
@@ -490,6 +655,8 @@ private enum ConversionError: LocalizedError {
     case jsonNotFound
     case invalidBase64
     case invalidURLText
+    case invalidEscapedText
+    case invalidUnicodeText
     case unsupportedConversion
 
     var errorDescription: String? {
@@ -502,6 +669,10 @@ private enum ConversionError: LocalizedError {
             return "Base64 内容无效，无法解密。"
         case .invalidURLText:
             return "URL 编码内容无效，无法解密。"
+        case .invalidEscapedText:
+            return "转义内容无效，无法解密。"
+        case .invalidUnicodeText:
+            return "Unicode 编码内容无效，无法解密。"
         case .unsupportedConversion:
             return "当前转换组合暂不支持。"
         }

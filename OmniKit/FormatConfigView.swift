@@ -16,7 +16,7 @@ struct FormatConfigView: View {
         SettingsCanvas {
             SettingsHeroCard(
                 title: "格式转换",
-                subtitle: "通过全局快捷键呼出转换弹窗，支持 JSON 提取格式化、随机生成 UUID/身份证号，以及按算法执行文本加密和解密。"
+                subtitle: "通过全局快捷键呼出转换弹窗，支持 JSON 提取格式化、随机生成 UUID/身份证号，以及 Base64、MD5、URL、转义和 Unicode 等文本处理。"
             ) {
                 Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
                     .font(.system(size: 30))
