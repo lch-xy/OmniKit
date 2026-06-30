@@ -93,6 +93,10 @@ struct MeetingRecord: Identifiable, Equatable, Codable {
     var endedAt: Date?
     var customTitle: String?
     var transcript: String
+    var summary: String?
+    var summaryProvider: String?
+    var summaryModel: String?
+    var summaryUpdatedAt: Date?
     var audioFileURL: URL?
 
     var title: String {
@@ -114,6 +118,88 @@ private struct RecognitionCandidate {
     var updatedAt = Date.distantPast
 }
 
+private struct DeepSeekSummaryService {
+    struct RequestBody: Encodable {
+        let model: String
+        let messages: [Message]
+        let temperature: Double
+        let stream: Bool
+    }
+
+    struct Message: Codable {
+        let role: String
+        let content: String
+    }
+
+    struct ResponseBody: Decodable {
+        let choices: [Choice]
+        let error: APIError?
+    }
+
+    struct Choice: Decodable {
+        let message: Message
+    }
+
+    struct APIError: Decodable {
+        let message: String
+    }
+
+    func summarize(transcript: String, apiKey: String, model: String) async throws -> String {
+        guard let url = URL(string: "https://api.deepseek.com/chat/completions") else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(
+            RequestBody(
+                model: model,
+                messages: [
+                    Message(
+                        role: "system",
+                        content: """
+                        你是一个专业会议纪要助手。请只基于用户提供的会议转写内容生成中文摘要，不要编造未出现的信息。
+                        输出结构固定为：
+                        摘要
+                        - ...
+
+                        重点
+                        - ...
+
+                        待办/决策
+                        - ...
+                        如果没有明确待办或决策，写“未识别到明确的待办或决策。”
+                        """
+                    ),
+                    Message(role: "user", content: transcript)
+                ],
+                temperature: 0.2,
+                stream: false
+            )
+        )
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<300).contains(httpResponse.statusCode) {
+            if let errorBody = try? JSONDecoder().decode(ResponseBody.self, from: data),
+               let message = errorBody.error?.message {
+                throw NSError(domain: "DeepSeek", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+            throw NSError(domain: "DeepSeek", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "DeepSeek 请求失败（HTTP \(httpResponse.statusCode)）"])
+        }
+
+        let decoded = try JSONDecoder().decode(ResponseBody.self, from: data)
+        let content = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !content.isEmpty else {
+            throw NSError(domain: "DeepSeek", code: -1, userInfo: [NSLocalizedDescriptionKey: "DeepSeek 返回了空摘要"])
+        }
+        return content
+    }
+}
+
 @MainActor
 final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, SFSpeechRecognizerDelegate {
     @Published var records: [MeetingRecord] = []
@@ -121,6 +207,18 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     @Published var statusMessage = "准备就绪"
     @Published var playingRecordID: MeetingRecord.ID?
     @Published var isPlaybackPaused = false
+    @Published private(set) var summarizingRecordIDs: Set<MeetingRecord.ID> = []
+    @Published private(set) var summaryErrors: [MeetingRecord.ID: String] = [:]
+    @Published var deepSeekAPIKey: String {
+        didSet {
+            OmniKitStore.shared.set(deepSeekAPIKey, forKey: Self.deepSeekAPIKeyDefaultsKey)
+        }
+    }
+    @Published var deepSeekModel: String {
+        didSet {
+            OmniKitStore.shared.set(deepSeekModel, forKey: Self.deepSeekModelDefaultsKey)
+        }
+    }
     @Published private(set) var primaryRecognitionLanguage: RecognitionLanguageOption
     @Published private(set) var secondaryRecognitionLanguage: RecognitionLanguageOption
 
@@ -139,11 +237,17 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     private let fileManager = FileManager.default
     private static let primaryRecognitionLanguageDefaultsKey = "meeting.recognition.language.primary"
     private static let secondaryRecognitionLanguageDefaultsKey = "meeting.recognition.language.secondary"
+    private static let deepSeekAPIKeyDefaultsKey = "meeting.summary.deepseek.apiKey"
+    private static let deepSeekModelDefaultsKey = "meeting.summary.deepseek.model"
+    private static let deepSeekSummaryProvider = "deepseek"
+    static let defaultDeepSeekModel = "deepseek-v4-pro"
 
     override init() {
         let storedPrimary = Self.loadRecognitionLanguage(key: Self.primaryRecognitionLanguageDefaultsKey) ?? .chinese
         let storedSecondary = Self.loadRecognitionLanguage(key: Self.secondaryRecognitionLanguageDefaultsKey) ?? .english
         let normalizedLanguages = Self.normalizedRecognitionLanguages(primary: storedPrimary, secondary: storedSecondary)
+        deepSeekAPIKey = OmniKitStore.shared.string(forKey: Self.deepSeekAPIKeyDefaultsKey) ?? ""
+        deepSeekModel = OmniKitStore.shared.string(forKey: Self.deepSeekModelDefaultsKey) ?? Self.defaultDeepSeekModel
         primaryRecognitionLanguage = normalizedLanguages.primary
         secondaryRecognitionLanguage = normalizedLanguages.secondary
         super.init()
@@ -199,6 +303,81 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         records[index].customTitle = trimmed.isEmpty ? nil : trimmed
         saveRecords()
+    }
+
+    func isGeneratingSummary(for id: MeetingRecord.ID) -> Bool {
+        summarizingRecordIDs.contains(id)
+    }
+
+    func summaryError(for id: MeetingRecord.ID) -> String? {
+        summaryErrors[id]
+    }
+
+    func generateSummaryIfNeeded(for id: MeetingRecord.ID) async {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        if let summary = records[index].summary?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty,
+           records[index].summaryProvider == Self.deepSeekSummaryProvider,
+           records[index].summaryModel == activeDeepSeekModel {
+            return
+        }
+        await generateSummary(for: id)
+    }
+
+    func regenerateSummary(for id: MeetingRecord.ID) async {
+        await generateSummary(for: id)
+    }
+
+    private func generateSummary(for id: MeetingRecord.ID) async {
+        guard let index = records.firstIndex(where: { $0.id == id }) else { return }
+        guard !summarizingRecordIDs.contains(id) else { return }
+
+        let transcript = records[index].transcript
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty,
+              trimmedTranscript != "（无可用转写内容）" else {
+            records[index].summary = "暂无可总结内容。"
+            saveRecords()
+            return
+        }
+
+        let apiKey = deepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else {
+            summaryErrors[id] = "请先配置 DeepSeek API Key。"
+            statusMessage = "请先配置 DeepSeek API Key。"
+            return
+        }
+
+        let model = activeDeepSeekModel
+        summarizingRecordIDs.insert(id)
+        summaryErrors[id] = nil
+        statusMessage = "正在通过 DeepSeek 生成会议摘要..."
+
+        do {
+            let summary = try await DeepSeekSummaryService().summarize(
+                transcript: trimmedTranscript,
+                apiKey: apiKey,
+                model: model
+            )
+            if let updatedIndex = records.firstIndex(where: { $0.id == id }) {
+                records[updatedIndex].summary = summary
+                records[updatedIndex].summaryProvider = Self.deepSeekSummaryProvider
+                records[updatedIndex].summaryModel = model
+                records[updatedIndex].summaryUpdatedAt = Date()
+                saveRecords()
+                statusMessage = "DeepSeek 会议摘要已生成"
+            }
+        } catch {
+            let message = "DeepSeek 摘要生成失败：\(error.localizedDescription)"
+            summaryErrors[id] = message
+            statusMessage = message
+        }
+        summarizingRecordIDs.remove(id)
+    }
+
+    private var activeDeepSeekModel: String {
+        let trimmed = deepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? Self.defaultDeepSeekModel : trimmed
     }
 
     func playRecord(_ id: MeetingRecord.ID) {
@@ -312,6 +491,10 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
             endedAt: nil,
             customTitle: nil,
             transcript: "",
+            summary: nil,
+            summaryProvider: nil,
+            summaryModel: nil,
+            summaryUpdatedAt: nil,
             audioFileURL: audioURL
         )
         records.insert(newRecord, at: 0)

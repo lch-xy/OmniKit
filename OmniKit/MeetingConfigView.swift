@@ -8,8 +8,12 @@ import SwiftUI
 struct MeetingConfigView: View {
     @EnvironmentObject private var meetingManager: MeetingManager
     @State private var presentedRecordID: MeetingRecord.ID?
+    @State private var presentedSummaryRecordID: MeetingRecord.ID?
     @State private var renamingRecordID: MeetingRecord.ID?
     @State private var draftRecordTitle = ""
+    @State private var draftDeepSeekAPIKey = ""
+    @State private var draftDeepSeekModel = MeetingManager.defaultDeepSeekModel
+    @State private var deepSeekSaveMessage = ""
     @State private var currentPage = 1
     private let pageSize = 10
 
@@ -74,6 +78,38 @@ struct MeetingConfigView: View {
                 }
             }
 
+            SettingsSection(title: "AI 摘要") {
+                SettingsRow("DeepSeek API Key", systemImage: "key", description: "用于调用 DeepSeek 生成会议摘要") {
+                    SecureField("必填", text: $draftDeepSeekAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                }
+
+                SettingsDivider()
+
+                SettingsRow("模型", systemImage: "brain", description: "默认使用 DeepSeek 官方当前推荐的 v4 pro 模型") {
+                    TextField(MeetingManager.defaultDeepSeekModel, text: $draftDeepSeekModel)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 180)
+                }
+
+                SettingsDivider()
+
+                SettingsRow("保存配置", systemImage: "tray.and.arrow.down") {
+                    HStack {
+                        if !deepSeekSaveMessage.isEmpty {
+                            SettingsInfoBadge(text: deepSeekSaveMessage, tint: .green)
+                        }
+                        Button("保存") {
+                            meetingManager.deepSeekAPIKey = draftDeepSeekAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                            meetingManager.deepSeekModel = draftDeepSeekModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                            deepSeekSaveMessage = "已保存"
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+
             SettingsSection(title: "录音历史") {
                 if meetingManager.records.isEmpty {
                     VStack(spacing: 12) {
@@ -133,12 +169,17 @@ struct MeetingConfigView: View {
         }
         .onAppear {
             adjustCurrentPageIfNeeded()
+            draftDeepSeekAPIKey = meetingManager.deepSeekAPIKey
+            draftDeepSeekModel = meetingManager.deepSeekModel
         }
         .onChange(of: meetingManager.records.count) { _, _ in
             adjustCurrentPageIfNeeded()
         }
         .sheet(isPresented: presentedTranscriptBinding) {
             transcriptSheet
+        }
+        .sheet(isPresented: presentedSummaryBinding) {
+            summarySheet
         }
         .sheet(isPresented: renamingRecordBinding) {
             renameSheet
@@ -175,6 +216,18 @@ struct MeetingConfigView: View {
                     Image(systemName: "text.alignleft")
                 }
                 .help("查看文本")
+
+                Button { presentedSummaryRecordID = record.id } label: {
+                    if meetingManager.isGeneratingSummary(for: record.id) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(width: 13, height: 13)
+                    } else {
+                        Image(systemName: "sparkles")
+                    }
+                }
+                .disabled(meetingManager.isGeneratingSummary(for: record.id))
+                .help("查看摘要")
 
                 Button { beginRenaming(record) } label: {
                     Image(systemName: "pencil")
@@ -245,6 +298,13 @@ struct MeetingConfigView: View {
         .environmentObject(meetingManager)
     }
 
+    private var summarySheet: some View {
+        MeetingSummarySheet(recordID: presentedSummaryRecordID) {
+            presentedSummaryRecordID = nil
+        }
+        .environmentObject(meetingManager)
+    }
+
     private var renameSheet: some View {
         NavigationStack {
             VStack(alignment: .leading, spacing: 16) {
@@ -270,6 +330,10 @@ struct MeetingConfigView: View {
 
     private var presentedTranscriptBinding: Binding<Bool> {
         Binding(get: { presentedRecordID != nil }, set: { if !$0 { presentedRecordID = nil } })
+    }
+
+    private var presentedSummaryBinding: Binding<Bool> {
+        Binding(get: { presentedSummaryRecordID != nil }, set: { if !$0 { presentedSummaryRecordID = nil } })
     }
 
     private var renamingRecordBinding: Binding<Bool> {
@@ -323,5 +387,78 @@ private struct TranscriptSheet: View {
             }
         }
         .frame(minWidth: 500, minHeight: 400)
+    }
+}
+
+private struct MeetingSummarySheet: View {
+    @EnvironmentObject private var meetingManager: MeetingManager
+    let recordID: MeetingRecord.ID?
+    let onClose: () -> Void
+
+    private var record: MeetingRecord? {
+        guard let id = recordID else { return nil }
+        return meetingManager.record(for: id)
+    }
+
+    private var summaryText: String {
+        let summary = record?.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return summary.isEmpty ? "正在生成摘要..." : summary
+    }
+
+    private var errorText: String? {
+        guard let recordID else { return nil }
+        return meetingManager.summaryError(for: recordID)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let recordID, meetingManager.isGeneratingSummary(for: recordID) {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("正在生成摘要...")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let errorText {
+                        Text(errorText)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                    } else {
+                        Text(summaryText)
+                            .font(.system(size: 13))
+                            .lineSpacing(6)
+                            .textSelection(.enabled)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(24)
+            }
+            .navigationTitle(record?.title ?? "AI 摘要")
+            .toolbar {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("重新生成") {
+                        guard let recordID else { return }
+                        Task {
+                            await meetingManager.regenerateSummary(for: recordID)
+                        }
+                    }
+                    .disabled(recordID == nil || recordID.map(meetingManager.isGeneratingSummary(for:)) == true)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { onClose() }
+                }
+            }
+        }
+        .frame(minWidth: 500, minHeight: 400)
+        .task(id: recordID) {
+            guard let recordID else { return }
+            await meetingManager.generateSummaryIfNeeded(for: recordID)
+        }
     }
 }
