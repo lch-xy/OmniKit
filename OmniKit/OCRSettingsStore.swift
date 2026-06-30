@@ -17,10 +17,18 @@ final class OCRSettingsStore: ObservableObject {
         }
     }
 
+    @Published var shouldPreviewResult: Bool {
+        didSet {
+            OmniKitStore.shared.set(shouldPreviewResult, forKey: Self.previewResultDefaultsKey)
+        }
+    }
+
     private static let ocrShortcutDefaultsKey = "ocr.shortcut.capture"
+    private static let previewResultDefaultsKey = "ocr.result.preview"
 
     init() {
         ocrShortcut = Self.loadShortcut(key: Self.ocrShortcutDefaultsKey) ?? .defaultOCR
+        shouldPreviewResult = OmniKitStore.shared.object(forKey: Self.previewResultDefaultsKey) as? Bool ?? true
     }
 
     private static func loadShortcut(key: String) -> ShortcutCombination? {
