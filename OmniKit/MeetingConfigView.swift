@@ -3,7 +3,9 @@
 //  OmniKit
 //
 
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct MeetingConfigView: View {
     @EnvironmentObject private var meetingManager: MeetingManager
@@ -229,6 +231,11 @@ struct MeetingConfigView: View {
                 .disabled(meetingManager.isGeneratingSummary(for: record.id))
                 .help("查看摘要")
 
+                Button { exportMarkdown(record) } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .help("导出 Markdown")
+
                 Button { beginRenaming(record) } label: {
                     Image(systemName: "pencil")
                 }
@@ -355,6 +362,39 @@ struct MeetingConfigView: View {
             meetingManager.renameRecord(id, to: draftRecordTitle)
         }
         cancelRenaming()
+    }
+
+    private func exportMarkdown(_ record: MeetingRecord) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "\(safeFilename(record.title)).md"
+        panel.canCreateDirectories = true
+
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        do {
+            try markdownContent(for: record).write(to: url, atomically: true, encoding: .utf8)
+            meetingManager.statusMessage = "已导出 Markdown：\(url.lastPathComponent)"
+        } catch {
+            meetingManager.statusMessage = "导出 Markdown 失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func markdownContent(for record: MeetingRecord) -> String {
+        let summary = record.summary?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return """
+        # \(record.title)
+
+        \(summary?.isEmpty == false ? summary! : "暂无摘要。")
+        """
+    }
+
+    private func safeFilename(_ text: String) -> String {
+        let invalidCharacters = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        let name = text.components(separatedBy: invalidCharacters).joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "会议记录" : name
     }
 }
 
