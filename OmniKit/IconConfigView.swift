@@ -14,7 +14,7 @@ struct IconConfigView: View {
         SettingsCanvas {
             SettingsHeroCard(
                 title: "图标",
-                subtitle: "管理菜单栏里的第三方 App 图标。启用「折叠菜单栏图标」后，OmniKit 会在菜单栏里注入 chevron + 分隔符两个图标。你可以在下方先把图标「标记收纳」；对大多数运行时图标，只需按住 ⌘ 手动摆到分隔符左侧一次，之后就能长期记住并直接点折叠。少数写入了 NSStatusItem 持久化开关的 App 还支持直接真隐藏。系统自带图标请前往「系统设置 › 控制中心」调整。"
+                subtitle: "仅折叠标记收纳的第三方图标，未标记图标保持显示。OmniKit 会自动排列图标，新程序启动后也会重新核验分组。系统自带图标请前往「系统设置 › 控制中心」调整。"
             ) {
                 Image(systemName: "menubar.rectangle")
                     .font(.system(size: 30))
@@ -25,7 +25,7 @@ struct IconConfigView: View {
                 SettingsRow(
                     "启用折叠功能",
                     systemImage: "rectangle.compress.vertical",
-                    description: "在菜单栏里额外显示 OmniKit 的 chevron 按钮和一个透明分隔符。关闭后这两个图标会被移除。"
+                    description: "显示折叠按钮，按收纳名单自动排列并折叠图标，应用继续运行。"
                 ) {
                     Toggle("", isOn: Binding(
                         get: { menuBarFolder.isEnabled },
@@ -41,23 +41,40 @@ struct IconConfigView: View {
                 SettingsRow(
                     "当前状态",
                     systemImage: menuBarFolder.isCollapsed ? "chevron.right.2" : "chevron.left.2",
-                    description: menuBarFolder.isEnabled
-                        ? (menuBarFolder.isCollapsed ? "已折叠：位于分隔符左侧的已收纳图标会被挤出可视区。" : "已展开：所有图标可见。")
-                        : "折叠功能未启用。"
+                    description: menuBarFolder.isEnabled ? menuBarFolder.statusMessage : "折叠功能未启用。"
                 ) {
-                    Button(menuBarFolder.isCollapsed ? "展开" : "折叠已收纳") {
+                    Button(menuBarFolder.isArranging ? "排列中…" : (menuBarFolder.isCollapsed ? "展开" : "折叠已收纳")) {
                         menuBarFolder.toggleCollapsed()
                     }
                     .buttonStyle(.bordered)
-                    .disabled(!menuBarFolder.isEnabled)
+                    .disabled(!menuBarFolder.isEnabled || menuBarFolder.isArranging)
                 }
 
                 SettingsDivider()
 
+                if menuBarFolder.needsAccessibility || menuBarFolder.needsScreenRecording {
+                    SettingsRow(
+                        "自动排列权限",
+                        systemImage: "hand.raised",
+                        description: "辅助功能用于移动图标，屏幕录制权限用于读取图标名称。授权后如系统提示，请重新打开 OmniKit。"
+                    ) {
+                        HStack(spacing: 8) {
+                            if menuBarFolder.needsAccessibility {
+                                Button("授权辅助功能") { menuBarFolder.requestAccessibilityPermission() }
+                            }
+                            if menuBarFolder.needsScreenRecording {
+                                Button("授权屏幕录制") { menuBarFolder.requestScreenRecordingPermission() }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    SettingsDivider()
+                }
+
                 SettingsRow(
                     "已标记收纳",
                     systemImage: "tray.full",
-                    description: "运行时图标首次仍需按住 ⌘ 摆到分隔符左侧一次；之后 OmniKit 会记住它属于折叠组。"
+                    description: "标记后会自动归入折叠组；取消标记会恢复显示。无法确认身份的图标保持显示。"
                 ) {
                     SettingsInfoBadge(text: "\(menuBarIconManager.stashedItemsCount) 个", tint: .blue)
                 }
@@ -83,7 +100,9 @@ struct IconConfigView: View {
                     SettingsRow(
                         "暂无可控制的第三方图标",
                         systemImage: "app.dashed",
-                        description: "没有扫描到当前运行的菜单栏常驻 App，也没有 App 在偏好设置里写入 NSStatusItem 可见性。启动一些带状态栏图标的 App 后再点击右下角「刷新状态」。"
+                        description: menuBarFolder.needsScreenRecording
+                            ? "请先授予屏幕录制权限，再刷新实际的菜单栏图标。"
+                            : "没有读取到第三方菜单栏图标。启动带菜单栏图标的 App 后点击「刷新状态」。"
                     ) {
                         SettingsInfoBadge(text: "空", tint: .orange)
                     }
@@ -146,10 +165,10 @@ struct IconConfigView: View {
 
 private struct FolderUsageInstructions: View {
     private let steps: [(String, String)] = [
-        ("1", "启用上方的「启用折叠功能」开关。OmniKit 会在菜单栏右侧放置一个 chevron 按钮和一个透明分隔符。"),
-        ("2", "在下方「第三方应用图标」里，把你想长期隐藏的条目标记为「收纳」。这里的作用是记住名单，不会自动搬动第三方图标。"),
-        ("3", "对于大多数运行时图标，首次仍需按住 ⌘ 键把它拖到分隔符左侧一次；之后布局会保留，不需要每次都重新摆放。"),
-        ("4", "点击 chevron：分隔符左侧的已收纳图标会被挤出可视区实现折叠；再点一次即恢复。期间对应 App 始终在运行。")
+        ("1", "启用折叠功能，并授予辅助功能和屏幕录制权限。"),
+        ("2", "在下方标记要收纳的图标。若同一应用有多个图标，可以分别选择。"),
+        ("3", "点击折叠按钮后，OmniKit 自动排列并核验，只折叠已标记图标。"),
+        ("4", "新图标出现时会自动重新排列，期间可能短暂展开；排列失败时保持展开并提示原因。")
     ]
 
     var body: some View {
@@ -202,7 +221,7 @@ private struct ThirdPartyStatusItemRow: View {
         case .persistent:
             return "\(owner.displayName) · \(item.title)"
         case .runtimeOnly:
-            return owner.displayName
+            return owner.items.count > 1 ? "\(owner.displayName) · \(item.title)" : owner.displayName
         }
     }
 
@@ -212,7 +231,7 @@ private struct ThirdPartyStatusItemRow: View {
         case .persistent:
             return "\(item.summary)\(stashSuffix)"
         case .runtimeOnly:
-            return "\(item.summary)\(stashSuffix) 首次需要手动摆到分隔符左侧一次。"
+            return "\(item.summary)\(stashSuffix)"
         }
     }
 

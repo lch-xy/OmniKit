@@ -53,7 +53,9 @@ struct TranslationConfigView: View {
                 
                 SettingsRow("保存配置", systemImage: "tray.and.arrow.down") {
                     HStack {
-                        if !saveMessage.isEmpty {
+                        if let error = translationSettings.credentialError {
+                            SettingsInfoBadge(text: error, tint: .red)
+                        } else if !saveMessage.isEmpty {
                             SettingsInfoBadge(text: saveMessage, tint: .green)
                         }
                         Button("保存") {

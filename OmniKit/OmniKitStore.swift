@@ -10,6 +10,7 @@
 //
 
 import Foundation
+import AppKit
 
 final class OmniKitStore: @unchecked Sendable {
 
@@ -18,6 +19,8 @@ final class OmniKitStore: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.lch.OmniKit.Store", qos: .userInitiated)
     private let fileURL: URL
     private var storage: [String: Any]
+    private var loadError: Error?
+    private var terminationObserver: NSObjectProtocol?
     /// 防抖写盘任务，避免连续写入频繁落盘。
     private var pendingSaveWorkItem: DispatchWorkItem?
 
@@ -25,15 +28,32 @@ final class OmniKitStore: @unchecked Sendable {
 
     init(fileURL: URL = OmniKitDataLocation.configFileURL) {
         self.fileURL = fileURL
-        OmniKitDataLocation.ensureDirectoriesExist()
-        self.storage = Self.loadInitialStorage(from: fileURL)
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        self.storage = [:]
+        do {
+            self.storage = try Self.loadInitialStorage(from: fileURL)
+        } catch {
+            loadError = error
+            NSLog("[OmniKit] OmniKitStore load failed: \(error.localizedDescription)")
+        }
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            do {
+                try self?.synchronize()
+            } catch {
+                NSLog("[OmniKit] OmniKitStore final save failed: \(error.localizedDescription)")
+            }
+        }
     }
 
-    private static func loadInitialStorage(from url: URL) -> [String: Any] {
+    deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+    }
+
+    private static func loadInitialStorage(from url: URL) throws -> [String: Any] {
         guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
-        guard let data = try? Data(contentsOf: url),
-              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
-            return [:]
+        let data = try Data(contentsOf: url)
+        guard let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+            throw CocoaError(.fileReadCorruptFile)
         }
         return plist
     }
@@ -100,24 +120,34 @@ final class OmniKitStore: @unchecked Sendable {
     }
 
     /// 立即落盘，不等防抖。
-    func synchronize() {
-        queue.sync { [self] in
+    func synchronize() throws {
+        try queue.sync { [self] in
             pendingSaveWorkItem?.cancel()
             pendingSaveWorkItem = nil
-            saveLocked()
+            try saveLocked()
+            let saved = try Self.loadInitialStorage(from: fileURL)
+            guard NSDictionary(dictionary: storage).isEqual(to: saved) else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
         }
     }
 
     /// 批量导入 —— 迁移场景使用。不存在的键才写，不覆盖已有值。
-    func importIfAbsent(_ values: [String: Any]) {
-        queue.sync { [self] in
+    func importIfAbsent(_ values: [String: Any]) throws {
+        try queue.sync { [self] in
+            let previousStorage = storage
             var changed = false
             for (k, v) in values where storage[k] == nil {
                 storage[k] = v
                 changed = true
             }
             if changed {
-                saveLocked()
+                do {
+                    try saveLocked()
+                } catch {
+                    storage = previousStorage
+                    throw error
+                }
             }
         }
     }
@@ -135,26 +165,20 @@ final class OmniKitStore: @unchecked Sendable {
             guard let self = self else { return }
             // `work` 已经通过 `queue.asyncAfter` 投递到同一条串行队列，
             // 这里再 `queue.sync` 会发生自锁。
-            self.saveLocked()
+            do {
+                try self.saveLocked()
+            } catch {
+                NSLog("[OmniKit] OmniKitStore save failed: \(error.localizedDescription)")
+            }
         }
         pendingSaveWorkItem = work
         queue.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
     /// 调用者必须持有 `queue`。
-    private func saveLocked() {
-        do {
-            let data = try PropertyListSerialization.data(fromPropertyList: storage, format: .binary, options: 0)
-            // 原子写：先写 tmp 再 rename，避免断电半截文件
-            let tmpURL = fileURL.appendingPathExtension("tmp")
-            try data.write(to: tmpURL, options: .atomic)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                _ = try? FileManager.default.replaceItemAt(fileURL, withItemAt: tmpURL)
-            } else {
-                try FileManager.default.moveItem(at: tmpURL, to: fileURL)
-            }
-        } catch {
-            NSLog("[OmniKit] OmniKitStore save failed: \(error.localizedDescription)")
-        }
+    private func saveLocked() throws {
+        if let loadError { throw loadError }
+        let data = try PropertyListSerialization.data(fromPropertyList: storage, format: .binary, options: 0)
+        try data.write(to: fileURL, options: .atomic)
     }
 }

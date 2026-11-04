@@ -9,7 +9,7 @@ import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum ImageToolType: String, CaseIterable, Identifiable {
+nonisolated enum ImageToolType: String, CaseIterable, Identifiable, Sendable {
     case compress
     case formatConvert
     case flip
@@ -28,7 +28,7 @@ enum ImageToolType: String, CaseIterable, Identifiable {
     }
 }
 
-enum ImageOutputFormat: String, CaseIterable, Identifiable {
+nonisolated enum ImageOutputFormat: String, CaseIterable, Identifiable, Sendable {
     case jpeg
     case png
     case tiff
@@ -82,7 +82,7 @@ enum ImageOutputFormat: String, CaseIterable, Identifiable {
     }
 }
 
-enum ImageFlipDirection: String, CaseIterable, Identifiable {
+nonisolated enum ImageFlipDirection: String, CaseIterable, Identifiable, Sendable {
     case horizontal
     case vertical
 
@@ -254,6 +254,9 @@ final class ImagePanelViewModel: ObservableObject {
     @Published var statusTint: Color = .secondary
     @Published var sourceSummary = "尚未选择图片"
     @Published var resultSummary = "处理后的图片会显示在这里"
+    @Published private(set) var isProcessing = false
+    private var imageTask: Task<Void, Never>?
+    private var operationID: UUID?
 
     private var sourceURL: URL?
     private var sourceData: Data?
@@ -284,10 +287,11 @@ final class ImagePanelViewModel: ObservableObject {
     func importImageFromPasteboard() {
         let pasteboard = NSPasteboard.general
         if let image = pasteboard.readObjects(forClasses: [NSImage.self])?.first as? NSImage {
+            cancelProcessing()
             sourceImage = image
             resultImage = nil
             sourceURL = nil
-            sourceData = image.tiffRepresentation
+            sourceData = pasteboard.data(forType: .png) ?? pasteboard.data(forType: .tiff) ?? image.tiffRepresentation
             sourceFormat = nil
             sourceFileExtension = nil
             resultData = nil
@@ -303,6 +307,7 @@ final class ImagePanelViewModel: ObservableObject {
     }
 
     func clearImages() {
+        cancelProcessing()
         sourceImage = nil
         resultImage = nil
         sourceURL = nil
@@ -318,41 +323,67 @@ final class ImagePanelViewModel: ObservableObject {
     }
 
     func runProcessing() {
-        guard let sourceImage else {
+        guard let data = sourceData else {
             statusMessage = ImageProcessingError.imageNotSelected.localizedDescription
             statusTint = .orange
             return
         }
-        guard let cgImage = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            statusMessage = ImageProcessingError.imageLoadFailed.localizedDescription
-            statusTint = .red
-            return
-        }
-
-        do {
-            let processed: (image: NSImage, data: Data, format: ImageOutputFormat, summary: String)
-            switch selectedTool {
-            case .compress:
-                processed = try processCompression(cgImage)
-            case .formatConvert:
-                processed = try processFormatConversion(cgImage)
-            case .flip:
-                processed = try processFlip(cgImage)
+        cancelProcessing()
+        let id = UUID()
+        operationID = id
+        let tool = selectedTool
+        let format = sourceFormat
+        let quality = compressionQuality
+        let outputFormat = conversionFormat
+        let direction = flipDirection
+        isProcessing = true
+        statusMessage = "正在处理..."
+        imageTask = Task {
+            defer {
+                if operationID == id { isProcessing = false; imageTask = nil }
             }
+            do {
+                let processed = try await Self.processImage(data: data, tool: tool, sourceFormat: format, quality: quality, outputFormat: outputFormat, direction: direction)
+                guard !Task.isCancelled, operationID == id else { return }
+                guard let image = NSImage(data: processed.data) else { throw ImageProcessingError.conversionFailed }
+                resultImage = image
+                resultData = processed.data
+                resultFormat = processed.format
+                resultFileExtension = resolvedResultFileExtension(for: processed.format)
+                resultSummary = processed.summary
+                statusMessage = "处理完成"
+                statusTint = .green
+            } catch {
+                guard !Task.isCancelled, operationID == id else { return }
+                resultImage = nil
+                resultData = nil
+                resultSummary = "处理后的图片会显示在这里"
+                statusMessage = error.localizedDescription
+                statusTint = .red
+            }
+        }
+    }
 
-            resultImage = processed.image
-            resultData = processed.data
-            resultFormat = processed.format
-            resultFileExtension = resolvedResultFileExtension(for: processed.format)
-            resultSummary = processed.summary
-            statusMessage = "处理完成"
-            statusTint = .green
-        } catch {
-            resultImage = nil
-            resultData = nil
-            resultSummary = "处理后的图片会显示在这里"
-            statusMessage = error.localizedDescription
-            statusTint = .red
+    private func cancelProcessing() {
+        operationID = nil
+        imageTask?.cancel()
+        imageTask = nil
+        isProcessing = false
+    }
+
+    @concurrent
+    nonisolated static func processImage(data: Data, tool: ImageToolType, sourceFormat: ImageOutputFormat?, quality: Double, outputFormat: ImageOutputFormat, direction: ImageFlipDirection) async throws -> (data: Data, format: ImageOutputFormat, summary: String) {
+        try Task.checkCancellation()
+        guard let image = NSImage(data: data), let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ImageProcessingError.imageLoadFailed
+        }
+        switch tool {
+        case .compress:
+            return try processCompression(cgImage, format: sourceFormat ?? .jpeg, quality: quality, originalSize: data.count)
+        case .formatConvert:
+            return try processFormatConversion(cgImage, format: outputFormat)
+        case .flip:
+            return try processFlip(cgImage, direction: direction)
         }
     }
 
@@ -401,59 +432,69 @@ final class ImagePanelViewModel: ObservableObject {
     }
 
     private func loadImage(from url: URL) {
-        do {
-            let hasSecurityAccess = url.startAccessingSecurityScopedResource()
+        cancelProcessing()
+        let id = UUID()
+        operationID = id
+        isProcessing = true
+        statusMessage = "正在读取图片..."
+        imageTask = Task {
             defer {
-                if hasSecurityAccess {
-                    url.stopAccessingSecurityScopedResource()
-                }
+                if operationID == id { isProcessing = false; imageTask = nil }
             }
-            let data = try Data(contentsOf: url)
-            guard let image = NSImage(data: data) else {
-                throw ImageProcessingError.imageLoadFailed
+            do {
+                let loaded = try await Self.readImage(from: url)
+                guard !Task.isCancelled, operationID == id else { return }
+                guard let image = NSImage(data: loaded.data) else { throw ImageProcessingError.imageLoadFailed }
+                sourceImage = image
+                resultImage = nil
+                sourceURL = url
+                sourceData = loaded.data
+                sourceFormat = ImageOutputFormat.from(fileExtension: url.pathExtension)
+                sourceFileExtension = url.pathExtension.isEmpty ? nil : url.pathExtension
+                resultData = nil
+                resultFileExtension = resolvedResultFileExtension(for: sourceFormat ?? .png)
+                sourceSummary = "\(url.lastPathComponent) · \(loaded.width)×\(loaded.height) · \(Self.formatBytes(loaded.data.count))"
+                resultSummary = "处理后的图片会显示在这里"
+                statusMessage = "已载入 \(url.lastPathComponent)"
+                statusTint = .green
+            } catch {
+                guard !Task.isCancelled, operationID == id else { return }
+                statusMessage = error.localizedDescription
+                statusTint = .red
             }
-            sourceImage = image
-            resultImage = nil
-            sourceURL = url
-            sourceData = data
-            sourceFormat = ImageOutputFormat.from(fileExtension: url.pathExtension)
-            sourceFileExtension = url.pathExtension.isEmpty ? nil : url.pathExtension
-            resultData = nil
-            resultFileExtension = resolvedResultFileExtension(for: sourceFormat ?? .png)
-            sourceSummary = describe(imageData: data, fallbackTitle: url.lastPathComponent, cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil))
-            resultSummary = "处理后的图片会显示在这里"
-            statusMessage = "已载入 \(url.lastPathComponent)"
-            statusTint = .green
-        } catch {
-            statusMessage = error.localizedDescription
-            statusTint = .red
         }
     }
 
-    private func processCompression(_ cgImage: CGImage) throws -> (NSImage, Data, ImageOutputFormat, String) {
-        let outputFormat = sourceFormat ?? .jpeg
-        let data = try compressedData(cgImage: cgImage, format: outputFormat, preferredQuality: compressionQuality)
-        guard let image = NSImage(data: data) else {
-            throw ImageProcessingError.conversionFailed
+    @concurrent
+    nonisolated private static func readImage(from url: URL) async throws -> (data: Data, width: Int, height: Int) {
+        try Task.checkCancellation()
+        let hasSecurityAccess = url.startAccessingSecurityScopedResource()
+        defer {
+            if hasSecurityAccess {
+                url.stopAccessingSecurityScopedResource()
+            }
         }
-
-        let sourceSize = sourceData?.count ?? 0
-        let ratio = sourceSize > 0 ? Double(data.count) / Double(sourceSize) : 0
-        let summary = "\(outputFormat.title) 压缩后 \(formatBytes(data.count))，约为原图的 \(Int(ratio * 100))%"
-        return (image, data, outputFormat, summary)
+        let data = try Data(contentsOf: url)
+        guard let image = NSImage(data: data), let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            throw ImageProcessingError.imageLoadFailed
+        }
+        return (data, cgImage.width, cgImage.height)
     }
 
-    private func processFormatConversion(_ cgImage: CGImage) throws -> (NSImage, Data, ImageOutputFormat, String) {
-        let quality: CGFloat = conversionFormat == .jpeg || conversionFormat == .heic ? 0.9 : 1.0
-        let data = try encode(cgImage: cgImage, format: conversionFormat, quality: quality)
-        guard let image = NSImage(data: data) else {
-            throw ImageProcessingError.conversionFailed
-        }
-        let summary = "\(conversionFormat.title) 格式，\(formatBytes(data.count))"
-        return (image, data, conversionFormat, summary)
+    nonisolated private static func processCompression(_ cgImage: CGImage, format: ImageOutputFormat, quality: Double, originalSize: Int) throws -> (Data, ImageOutputFormat, String) {
+        let data = try compressedData(cgImage: cgImage, format: format, preferredQuality: quality, originalSize: originalSize)
+        let ratio = originalSize > 0 ? Double(data.count) / Double(originalSize) : 0
+        let summary = "\(format.title) 压缩后 \(formatBytes(data.count))，约为原图的 \(Int(ratio * 100))%"
+        return (data, format, summary)
     }
 
-    private func processFlip(_ cgImage: CGImage) throws -> (NSImage, Data, ImageOutputFormat, String) {
+    nonisolated private static func processFormatConversion(_ cgImage: CGImage, format: ImageOutputFormat) throws -> (Data, ImageOutputFormat, String) {
+        let quality: CGFloat = format == .jpeg || format == .heic ? 0.9 : 1.0
+        let data = try encode(cgImage: cgImage, format: format, quality: quality)
+        return (data, format, "\(format.title) 格式，\(formatBytes(data.count))")
+    }
+
+    nonisolated private static func processFlip(_ cgImage: CGImage, direction: ImageFlipDirection) throws -> (Data, ImageOutputFormat, String) {
         let width = cgImage.width
         let height = cgImage.height
         guard let context = CGContext(
@@ -469,7 +510,7 @@ final class ImagePanelViewModel: ObservableObject {
         }
 
         context.interpolationQuality = .high
-        if flipDirection == .horizontal {
+        if direction == .horizontal {
             context.translateBy(x: CGFloat(width), y: 0)
             context.scaleBy(x: -1, y: 1)
         } else {
@@ -483,13 +524,11 @@ final class ImagePanelViewModel: ObservableObject {
         }
 
         let data = try encode(cgImage: outputCGImage, format: .png, quality: 1.0)
-        guard let image = NSImage(data: data) else {
-            throw ImageProcessingError.conversionFailed
-        }
-        return (image, data, .png, "\(flipDirection.title)，\(formatBytes(data.count))")
+        return (data, .png, "\(direction.title)，\(formatBytes(data.count))")
     }
 
-    private func encode(cgImage: CGImage, format: ImageOutputFormat, quality: CGFloat) throws -> Data {
+    nonisolated private static func encode(cgImage: CGImage, format: ImageOutputFormat, quality: CGFloat) throws -> Data {
+        try Task.checkCancellation()
         let mutableData = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(mutableData, format.utType.identifier as CFString, 1, nil) else {
             throw ImageProcessingError.unsupportedFormat
@@ -506,9 +545,8 @@ final class ImagePanelViewModel: ObservableObject {
         return mutableData as Data
     }
 
-    private func compressedData(cgImage: CGImage, format: ImageOutputFormat, preferredQuality: Double) throws -> Data {
+    nonisolated private static func compressedData(cgImage: CGImage, format: ImageOutputFormat, preferredQuality: Double, originalSize: Int) throws -> Data {
         let targetQuality = CGFloat(preferredQuality)
-        let originalSize = sourceData?.count ?? .max
 
         if format == .jpeg || format == .heic {
             var bestData = try encode(cgImage: cgImage, format: format, quality: targetQuality)
@@ -571,20 +609,39 @@ final class ImagePanelViewModel: ObservableObject {
     }
 
     private func writeResultData(_ data: Data, to destinationURL: URL) {
-        do {
-            let hasSecurityAccess = sourceURL?.startAccessingSecurityScopedResource() ?? false
+        cancelProcessing()
+        let id = UUID()
+        operationID = id
+        let sourceURL = sourceURL
+        isProcessing = true
+        statusMessage = "正在导出..."
+        imageTask = Task {
             defer {
-                if hasSecurityAccess {
-                    sourceURL?.stopAccessingSecurityScopedResource()
-                }
+                if operationID == id { isProcessing = false; imageTask = nil }
             }
-            try data.write(to: destinationURL)
-            statusMessage = "已导出到 \(destinationURL.lastPathComponent)"
-            statusTint = .green
-        } catch {
-            statusMessage = ImageProcessingError.exportFailed(error.localizedDescription).localizedDescription
-            statusTint = .red
+            do {
+                try await Self.writeImageData(data, to: destinationURL, sourceURL: sourceURL)
+                guard !Task.isCancelled, operationID == id else { return }
+                statusMessage = "已导出到 \(destinationURL.lastPathComponent)"
+                statusTint = .green
+            } catch {
+                guard !Task.isCancelled, operationID == id else { return }
+                statusMessage = ImageProcessingError.exportFailed(error.localizedDescription).localizedDescription
+                statusTint = .red
+            }
         }
+    }
+
+    @concurrent
+    nonisolated private static func writeImageData(_ data: Data, to destinationURL: URL, sourceURL: URL?) async throws {
+        try Task.checkCancellation()
+        let hasSecurityAccess = sourceURL?.startAccessingSecurityScopedResource() ?? false
+        defer {
+            if hasSecurityAccess {
+                sourceURL?.stopAccessingSecurityScopedResource()
+            }
+        }
+        try data.write(to: destinationURL, options: .atomic)
     }
 
     private func describe(imageData: Data?, fallbackTitle: String, cgImage: CGImage? = nil) -> String {
@@ -594,11 +651,11 @@ final class ImagePanelViewModel: ObservableObject {
         } else {
             pixelLabel = "未知尺寸"
         }
-        let sizeLabel = imageData.map { formatBytes($0.count) } ?? "--"
+        let sizeLabel = imageData.map { Self.formatBytes($0.count) } ?? "--"
         return "\(fallbackTitle) · \(pixelLabel) · \(sizeLabel)"
     }
 
-    private func formatBytes(_ count: Int) -> String {
+    nonisolated private static func formatBytes(_ count: Int) -> String {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         return formatter.string(fromByteCount: Int64(count))
@@ -647,6 +704,7 @@ private struct ImageQuickPanelView: View {
                         .pickerStyle(.radioGroup)
                         .horizontalRadioGroupLayout()
                         .labelsHidden()
+                        .disabled(viewModel.isProcessing)
                     }
 
                     HStack(alignment: .center) {
@@ -720,10 +778,13 @@ private struct ImageQuickPanelView: View {
                         .buttonStyle(.bordered)
                     Button("执行") { viewModel.runProcessing() }
                         .buttonStyle(.borderedProminent)
+                        .disabled(viewModel.isProcessing)
                     Button("复制结果") { viewModel.copyResultImage() }
                         .buttonStyle(.bordered)
+                        .disabled(viewModel.isProcessing)
                     Button("导出") { viewModel.exportResult() }
                         .buttonStyle(.bordered)
+                        .disabled(viewModel.isProcessing)
                 }
                 .padding(.horizontal, 16)
                 .padding(.bottom, 14)

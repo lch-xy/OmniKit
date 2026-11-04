@@ -68,11 +68,7 @@ final class OCRManager: ObservableObject {
         lastStatusMessage = "请框选截图区域..."
 
         Task {
-            defer {
-                Task { @MainActor in
-                    self.isRecognizing = false
-                }
-            }
+            defer { isRecognizing = false }
 
             do {
                 try await runInteractiveScreenCaptureToClipboard()
@@ -316,32 +312,22 @@ struct AppleOCRService {
         guard let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
             throw OCRFlowError.imageConversionFailed
         }
+        return try await Self.recognizeText(from: cgImage)
+    }
 
-        return try await withCheckedThrowingContinuation { continuation in
-            let request = VNRecognizeTextRequest { request, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                let observations = request.results as? [VNRecognizedTextObservation] ?? []
-                let lines = observations.compactMap { $0.topCandidates(1).first?.string }
-                let content = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                if content.isEmpty {
-                    continuation.resume(throwing: OCRFlowError.emptyResult)
-                } else {
-                    continuation.resume(returning: content)
-                }
-            }
-            request.recognitionLevel = .accurate
-            request.usesLanguageCorrection = true
-            request.recognitionLanguages = ["zh-Hans", "en-US", "ja-JP", "ko-KR"]
-
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(throwing: error)
-            }
-        }
+    @concurrent
+    nonisolated private static func recognizeText(from image: CGImage) async throws -> String {
+        try Task.checkCancellation()
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+        request.recognitionLanguages = ["zh-Hans", "en-US", "ja-JP", "ko-KR"]
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        try handler.perform([request])
+        try Task.checkCancellation()
+        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        let content = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { throw OCRFlowError.emptyResult }
+        return content
     }
 }

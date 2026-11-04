@@ -67,10 +67,11 @@ enum OmniKitDataLocation {
         OmniKit 数据目录
         ================
 
-        这里存放 OmniKit 运行时生成的全部数据，可以直接 zip 整个文件夹做备份。
+        这里存放 OmniKit 的配置与会议数据，可以直接 zip 整个文件夹做备份。
+        API 密钥单独保存在系统钥匙串中，不包含在此目录的备份里。
 
         文件说明：
-          • config.plist              所有用户配置（API Key、快捷键、识别语言、电池上限等）
+          • config.plist              普通配置（快捷键、识别语言、电池上限等）
           • Meetings/                 会议录音目录
               • records.json           录音索引
               • meeting_*.caf          单次录音文件

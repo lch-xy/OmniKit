@@ -80,6 +80,7 @@ struct MenuBarControlView: View {
                         systemImage: meetingManager.isRecording ? "stop.circle" : "record.circle"
                     )
                 }
+                .disabled(meetingManager.isStartingRecording || meetingManager.isFinishingRecording)
 
                 Button {
                     meetingManager.openRecordingsFolder()

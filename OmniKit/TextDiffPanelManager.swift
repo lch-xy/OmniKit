@@ -129,13 +129,17 @@ private final class TextDiffFloatingPanel: NSPanel {
 
 @MainActor
 final class TextDiffPanelViewModel: ObservableObject {
-    @Published var leftText = ""
-    @Published var rightText = ""
+    @Published var leftText = "" { didSet { invalidateComparison() } }
+    @Published var rightText = "" { didSet { invalidateComparison() } }
     @Published private(set) var rows: [TextDiffRow] = []
     @Published var statusMessage = ""
     @Published var statusTint: Color = .secondary
-    @Published var ignoreWhitespace = false
-    @Published var ignoreCase = false
+    @Published var ignoreWhitespace = false { didSet { invalidateComparison() } }
+    @Published var ignoreCase = false { didSet { invalidateComparison() } }
+    @Published private(set) var isComparing = false
+    private var comparisonTask: Task<Void, Never>?
+    private var comparisonID: UUID?
+    nonisolated static let maximumMatrixCells = 4_000_000
 
     var hasResult: Bool { !rows.isEmpty }
 
@@ -147,8 +151,7 @@ final class TextDiffPanelViewModel: ObservableObject {
     }
 
     func compare() {
-        let leftLines = leftText.splitIntoDiffLines()
-        let rightLines = rightText.splitIntoDiffLines()
+        invalidateComparison()
         guard !leftText.isEmpty || !rightText.isEmpty else {
             rows = []
             statusMessage = "请输入要比对的文本"
@@ -156,14 +159,56 @@ final class TextDiffPanelViewModel: ObservableObject {
             return
         }
 
-        rows = Self.buildDiffRows(
-            leftLines: leftLines,
-            rightLines: rightLines,
-            normalize: normalizedLine(_:)
-        )
-        let summary = summarize(rows)
-        statusMessage = summary
-        statusTint = summary == "两个文本一致" ? .green : .orange
+        let id = UUID()
+        comparisonID = id
+        let left = leftText
+        let right = rightText
+        let whitespace = ignoreWhitespace
+        let caseInsensitive = ignoreCase
+        isComparing = true
+        statusMessage = "正在比对..."
+        comparisonTask = Task {
+            defer {
+                if comparisonID == id {
+                    isComparing = false
+                    comparisonTask = nil
+                }
+            }
+            do {
+                let result = try await Self.calculateDiff(left: left, right: right, ignoreWhitespace: whitespace, ignoreCase: caseInsensitive)
+                guard !Task.isCancelled, comparisonID == id else { return }
+                rows = result
+                statusMessage = summarize(result)
+                statusTint = statusMessage == "两个文本一致" ? .green : .orange
+            } catch {
+                guard !Task.isCancelled, comparisonID == id else { return }
+                statusMessage = error.localizedDescription
+                statusTint = .orange
+            }
+        }
+    }
+
+    private func invalidateComparison() {
+        comparisonTask?.cancel()
+        comparisonTask = nil
+        comparisonID = nil
+        isComparing = false
+        rows = []
+        statusMessage = ""
+        statusTint = .secondary
+    }
+
+    @concurrent
+    nonisolated static func calculateDiff(left: String, right: String, ignoreWhitespace: Bool, ignoreCase: Bool) async throws -> [TextDiffRow] {
+        try Task.checkCancellation()
+        let leftLines = left.splitIntoDiffLines()
+        let rightLines = right.splitIntoDiffLines()
+        guard leftLines.count + 1 <= maximumMatrixCells / (rightLines.count + 1) else {
+            throw NSError(domain: "TextDiff", code: 1, userInfo: [NSLocalizedDescriptionKey: "文本过大，请缩小比对范围后重试。"])
+        }
+        return try buildDiffRows(leftLines: leftLines, rightLines: rightLines) {
+            normalizedLine($0, ignoreWhitespace: ignoreWhitespace, ignoreCase: ignoreCase)
+        }
     }
 
     func clearAll() {
@@ -181,7 +226,7 @@ final class TextDiffPanelViewModel: ObservableObject {
         compare()
     }
 
-    private func normalizedLine(_ line: String) -> String {
+    nonisolated private static func normalizedLine(_ line: String, ignoreWhitespace: Bool, ignoreCase: Bool) -> String {
         var output = line
         if ignoreWhitespace {
             output = output.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -208,14 +253,14 @@ final class TextDiffPanelViewModel: ObservableObject {
         return parts.joined(separator: "，")
     }
 
-    private static func buildDiffRows(
+    nonisolated private static func buildDiffRows(
         leftLines: [String],
         rightLines: [String],
         normalize: (String) -> String
-    ) -> [TextDiffRow] {
+    ) throws -> [TextDiffRow] {
         let leftNormalized = leftLines.map(normalize)
         let rightNormalized = rightLines.map(normalize)
-        let operations = diffOperations(left: leftNormalized, right: rightNormalized)
+        let operations = try diffOperations(left: leftNormalized, right: rightNormalized)
 
         var rows: [TextDiffRow] = []
         var pendingRemoved: [(number: Int, text: String)] = []
@@ -265,13 +310,14 @@ final class TextDiffPanelViewModel: ObservableObject {
         return rows
     }
 
-    private static func diffOperations(left: [String], right: [String]) -> [DiffOperation] {
+    nonisolated private static func diffOperations(left: [String], right: [String]) throws -> [DiffOperation] {
         let leftCount = left.count
         let rightCount = right.count
         var table = Array(repeating: Array(repeating: 0, count: rightCount + 1), count: leftCount + 1)
 
         if leftCount > 0, rightCount > 0 {
             for i in stride(from: leftCount - 1, through: 0, by: -1) {
+                try Task.checkCancellation()
                 for j in stride(from: rightCount - 1, through: 0, by: -1) {
                     if left[i] == right[j] {
                         table[i][j] = table[i + 1][j + 1] + 1
@@ -310,7 +356,7 @@ final class TextDiffPanelViewModel: ObservableObject {
     }
 }
 
-struct TextDiffRow: Identifiable {
+nonisolated struct TextDiffRow: Identifiable, Sendable {
     let id = UUID()
     let leftNumber: Int?
     let leftText: String?
@@ -319,7 +365,7 @@ struct TextDiffRow: Identifiable {
     let kind: TextDiffRowKind
 }
 
-enum TextDiffRowKind {
+nonisolated enum TextDiffRowKind: Sendable {
     case equal
     case added
     case removed
@@ -365,14 +411,14 @@ enum TextDiffRowKind {
     }
 }
 
-private enum DiffOperation {
+private nonisolated enum DiffOperation {
     case equal(leftIndex: Int, rightIndex: Int)
     case remove(leftIndex: Int)
     case insert(rightIndex: Int)
 }
 
 private extension String {
-    func splitIntoDiffLines() -> [String] {
+    nonisolated func splitIntoDiffLines() -> [String] {
         guard !isEmpty else { return [] }
         return components(separatedBy: .newlines)
     }
@@ -483,6 +529,7 @@ private struct TextDiffQuickPanelView: View {
                 .buttonStyle(.bordered)
             Button("开始比对") { viewModel.compare() }
                 .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isComparing)
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 14)

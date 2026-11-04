@@ -8,8 +8,9 @@ import ApplicationServices
 import Combine
 import CryptoKit
 import SwiftUI
+import UniformTypeIdentifiers
 
-enum ClipboardEntryKind: String, Codable, CaseIterable, Identifiable {
+nonisolated enum ClipboardEntryKind: String, Codable, CaseIterable, Identifiable, Sendable {
     case text
     case code
     case image
@@ -84,7 +85,7 @@ enum ClipboardFilterKind: String, CaseIterable, Identifiable {
     }
 }
 
-struct ClipboardHistoryEntry: Identifiable, Equatable {
+nonisolated struct ClipboardHistoryEntry: Identifiable, Equatable, Sendable {
     let id: UUID
     var kind: ClipboardEntryKind
     var title: String
@@ -100,6 +101,21 @@ struct ClipboardHistoryEntry: Identifiable, Equatable {
     let searchBlob: String
     let transliteratedBlob: String
     let initialsBlob: String
+    var byteCount = 0
+}
+
+nonisolated enum ClipboardCapture: Sendable {
+    case files([String])
+    case image(Data)
+    case text(String)
+
+    var byteCount: Int {
+        switch self {
+        case .files(let paths): return paths.reduce(0) { $0 + $1.utf8.count }
+        case .image(let data): return data.count
+        case .text(let text): return text.utf8.count
+        }
+    }
 }
 
 @MainActor
@@ -118,6 +134,7 @@ final class ClipboardPanelManager: ObservableObject {
     private var pasteboardChangeCount: Int
     private var pasteboardMonitor: AnyCancellable?
     private var lastTargetApplication: NSRunningApplication?
+    private var captureTask: Task<Void, Never>?
 
     init(settings: ClipboardSettingsStore) {
         self.settings = settings
@@ -173,10 +190,21 @@ final class ClipboardPanelManager: ObservableObject {
     }
 
     private func capturePasteboardIfNeeded(force: Bool = false) {
+        guard captureTask == nil else { return }
         guard force || pasteboard.changeCount != pasteboardChangeCount else { return }
         pasteboardChangeCount = pasteboard.changeCount
-        guard let entry = makeHistoryEntry(from: pasteboard) else { return }
-        viewModel.ingest(entry)
+        guard let content = capturePasteboardContent() else { return }
+        guard content.byteCount <= ClipboardPanelViewModel.maximumEntryBytes else {
+            viewModel.setStatus("内容超过 10 MiB，已跳过记录", tint: .orange)
+            return
+        }
+        let copiedAt = Date()
+        captureTask = Task {
+            defer { captureTask = nil }
+            if let entry = await Self.makeHistoryEntry(from: content, copiedAt: copiedAt) {
+                viewModel.ingest(entry)
+            }
+        }
     }
 
     private func showPanel() {
@@ -300,16 +328,33 @@ final class ClipboardPanelManager: ObservableObject {
         return app
     }
 
-    private func makeHistoryEntry(from pasteboard: NSPasteboard) -> ClipboardHistoryEntry? {
+    private func capturePasteboardContent() -> ClipboardCapture? {
         if let fileURLs = pasteboard.readObjects(
             forClasses: [NSURL.self],
             options: [.urlReadingFileURLsOnly: true]
         ) as? [URL], !fileURLs.isEmpty {
-            let paths = fileURLs.map(\.path)
+            return .files(fileURLs.map(\.path))
+        }
+        let types: [NSPasteboard.PasteboardType] = [.png, .tiff] + (pasteboard.types ?? [])
+        for type in types where type == .pdf || UTType(type.rawValue)?.conforms(to: .image) == true {
+            if let data = pasteboard.data(forType: type) { return .image(data) }
+        }
+        if let text = pasteboard.string(forType: .string), !text.isEmpty { return .text(text) }
+        return nil
+    }
+
+    @concurrent
+    nonisolated static func makeHistoryEntry(from content: ClipboardCapture, copiedAt: Date) async -> ClipboardHistoryEntry? {
+        var entry: ClipboardHistoryEntry
+        switch content {
+        case .files(let paths):
+            let fileURLs = paths.map { URL(fileURLWithPath: $0) }
+            guard !fileURLs.isEmpty else { return nil }
             let title = fileURLs.count == 1 ? fileURLs[0].lastPathComponent : "\(fileURLs.count) 个文件"
             let preview = paths.prefix(3).joined(separator: "\n")
             let searchable = ([title, preview] + paths).joined(separator: "\n")
-            return ClipboardHistoryEntry(
+            let latin = mutableLatinText(from: searchable)
+            entry = ClipboardHistoryEntry(
                 id: UUID(),
                 kind: .file,
                 title: title,
@@ -317,25 +362,23 @@ final class ClipboardPanelManager: ObservableObject {
                 fullText: nil,
                 imageData: nil,
                 filePaths: paths,
-                copiedAt: Date(),
+                copiedAt: copiedAt,
                 lastUsedAt: nil,
                 usageCount: 0,
                 isPinned: false,
                 fingerprint: "file:" + sha256(paths.sorted().joined(separator: "|")),
                 searchBlob: normalizeSearch(searchable),
-                transliteratedBlob: transliteratedSearch(searchable),
-                initialsBlob: transliteratedInitials(searchable)
+                transliteratedBlob: latin.replacingOccurrences(of: " ", with: ""),
+                initialsBlob: transliteratedInitials(latin)
             )
-        }
-
-        if let images = pasteboard.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage],
-           let image = images.first,
-           let data = pngData(for: image) ?? image.tiffRepresentation {
+        case .image(let sourceData):
+            guard let image = NSImage(data: sourceData), let data = pngData(for: image) ?? image.tiffRepresentation else { return nil }
             let size = image.size
             let title = "图片 \(Int(size.width))×\(Int(size.height))"
             let preview = "来自剪贴板"
             let searchable = "\(title) \(preview)"
-            return ClipboardHistoryEntry(
+            let latin = mutableLatinText(from: searchable)
+            entry = ClipboardHistoryEntry(
                 id: UUID(),
                 kind: .image,
                 title: title,
@@ -343,44 +386,46 @@ final class ClipboardPanelManager: ObservableObject {
                 fullText: nil,
                 imageData: data,
                 filePaths: [],
-                copiedAt: Date(),
+                copiedAt: copiedAt,
                 lastUsedAt: nil,
                 usageCount: 0,
                 isPinned: false,
                 fingerprint: "image:" + sha256(data),
                 searchBlob: normalizeSearch(searchable),
-                transliteratedBlob: transliteratedSearch(searchable),
-                initialsBlob: transliteratedInitials(searchable)
+                transliteratedBlob: latin.replacingOccurrences(of: " ", with: ""),
+                initialsBlob: transliteratedInitials(latin)
+            )
+        case .text(let text):
+            guard !text.isEmpty else { return nil }
+            let kind: ClipboardEntryKind = isCodeSnippet(text) ? .code : .text
+            let title = makeTextTitle(from: text)
+            let preview = makeTextPreview(from: text)
+            let searchable = [title, preview, text].joined(separator: "\n")
+            let latin = mutableLatinText(from: searchable)
+            entry = ClipboardHistoryEntry(
+                id: UUID(),
+                kind: kind,
+                title: title,
+                preview: preview,
+                fullText: text,
+                imageData: nil,
+                filePaths: [],
+                copiedAt: copiedAt,
+                lastUsedAt: nil,
+                usageCount: 0,
+                isPinned: false,
+                fingerprint: "\(kind.rawValue):" + sha256(text),
+                searchBlob: normalizeSearch(searchable),
+                transliteratedBlob: latin.replacingOccurrences(of: " ", with: ""),
+                initialsBlob: transliteratedInitials(latin)
             )
         }
-
-        guard let text = pasteboard.string(forType: .string)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !text.isEmpty else {
-            return nil
-        }
-
-        let kind: ClipboardEntryKind = isCodeSnippet(text) ? .code : .text
-        let title = makeTextTitle(from: text)
-        let preview = makeTextPreview(from: text)
-        let searchable = [title, preview, text].joined(separator: "\n")
-        return ClipboardHistoryEntry(
-            id: UUID(),
-            kind: kind,
-            title: title,
-            preview: preview,
-            fullText: text,
-            imageData: nil,
-            filePaths: [],
-            copiedAt: Date(),
-            lastUsedAt: nil,
-            usageCount: 0,
-            isPinned: false,
-            fingerprint: "\(kind.rawValue):" + sha256(text),
-            searchBlob: normalizeSearch(searchable),
-            transliteratedBlob: transliteratedSearch(searchable),
-            initialsBlob: transliteratedInitials(searchable)
-        )
+        let contentBytes = (entry.imageData?.count ?? 0) + (entry.fullText?.utf8.count ?? 0)
+        let pathBytes = entry.filePaths.reduce(0) { $0 + $1.utf8.count }
+        let searchFields = [entry.title, entry.preview, entry.searchBlob, entry.transliteratedBlob, entry.initialsBlob, entry.fingerprint]
+        let searchBytes = searchFields.reduce(0) { $0 + $1.utf8.count }
+        entry.byteCount = contentBytes + pathBytes + searchBytes
+        return entry
     }
 }
 
@@ -441,6 +486,8 @@ private final class ClipboardFloatingPanel: NSPanel {
 
 @MainActor
 final class ClipboardPanelViewModel: ObservableObject {
+    nonisolated static let maximumEntryBytes = 10 * 1024 * 1024
+    nonisolated static let maximumHistoryBytes = 100 * 1024 * 1024
     @Published private(set) var entries: [ClipboardHistoryEntry] = []
     @Published var searchQuery = "" {
         didSet { refreshSelection() }
@@ -494,8 +541,14 @@ final class ClipboardPanelViewModel: ObservableObject {
     }
 
     func ingest(_ incomingEntry: ClipboardHistoryEntry) {
-        if let existingIndex = entries.firstIndex(where: { $0.fingerprint == incomingEntry.fingerprint }) {
-            var existing = entries.remove(at: existingIndex)
+        guard incomingEntry.byteCount <= Self.maximumEntryBytes else {
+            setStatus("内容超过 10 MiB，已跳过记录", tint: .orange)
+            return
+        }
+        var updated = entries
+        let incomingID: UUID
+        if let existingIndex = updated.firstIndex(where: { $0.fingerprint == incomingEntry.fingerprint }) {
+            var existing = updated.remove(at: existingIndex)
             existing.kind = incomingEntry.kind
             existing.title = incomingEntry.title
             existing.preview = incomingEntry.preview
@@ -503,12 +556,22 @@ final class ClipboardPanelViewModel: ObservableObject {
             existing.imageData = incomingEntry.imageData
             existing.filePaths = incomingEntry.filePaths
             existing.copiedAt = incomingEntry.copiedAt
-            entries.insert(existing, at: 0)
+            existing.byteCount = incomingEntry.byteCount
+            incomingID = existing.id
+            updated.insert(existing, at: 0)
         } else {
-            entries.insert(incomingEntry, at: 0)
+            incomingID = incomingEntry.id
+            updated.insert(incomingEntry, at: 0)
         }
-
-        trimEntries()
+        var bytes = updated.reduce(0) { $0 + $1.byteCount }
+        while updated.count > 120 || bytes > Self.maximumHistoryBytes {
+            guard let index = updated.lastIndex(where: { !$0.isPinned && $0.id != incomingID }) else {
+                setStatus("固定内容已占满历史容量，已跳过新记录", tint: .orange)
+                return
+            }
+            bytes -= updated.remove(at: index).byteCount
+        }
+        entries = updated
         refreshSelection()
     }
 
@@ -580,16 +643,6 @@ final class ClipboardPanelViewModel: ObservableObject {
         guard let selectedEntryID else { return }
         if !filteredEntries.contains(where: { $0.id == selectedEntryID }) {
             refreshSelection()
-        }
-    }
-
-    private func trimEntries(maxCount: Int = 120) {
-        while entries.count > maxCount {
-            if let index = entries.lastIndex(where: { !$0.isPinned }) {
-                entries.remove(at: index)
-            } else {
-                break
-            }
         }
     }
 
@@ -1042,7 +1095,7 @@ private final class ClipboardPanelPinState: ObservableObject {
     @Published var isPinned = false
 }
 
-private func makeTextTitle(from text: String) -> String {
+nonisolated private func makeTextTitle(from text: String) -> String {
     let lines = text
         .components(separatedBy: .newlines)
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1050,7 +1103,7 @@ private func makeTextTitle(from text: String) -> String {
     return truncate(lines.first ?? text, limit: 70)
 }
 
-private func makeTextPreview(from text: String) -> String {
+nonisolated private func makeTextPreview(from text: String) -> String {
     let lines = text
         .components(separatedBy: .newlines)
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1061,7 +1114,7 @@ private func makeTextPreview(from text: String) -> String {
     return truncate(text, limit: 120)
 }
 
-private func isCodeSnippet(_ text: String) -> Bool {
+nonisolated private func isCodeSnippet(_ text: String) -> Bool {
     let lineBreakCount = text.filter { $0 == "\n" }.count
     let codeHints = [
         "import ", "func ", "class ", "struct ", "let ", "var ", "const ",
@@ -1072,7 +1125,7 @@ private func isCodeSnippet(_ text: String) -> Bool {
     return containsHint || lineBreakCount >= 2 || punctuationScore >= 6
 }
 
-private func normalizeSearch(_ text: String) -> String {
+nonisolated private func normalizeSearch(_ text: String) -> String {
     text
         .folding(options: [.diacriticInsensitive, .widthInsensitive, .caseInsensitive], locale: .current)
         .lowercased()
@@ -1080,13 +1133,7 @@ private func normalizeSearch(_ text: String) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-private func transliteratedSearch(_ text: String) -> String {
-    let latin = mutableLatinText(from: text)
-    return latin.replacingOccurrences(of: " ", with: "")
-}
-
-private func transliteratedInitials(_ text: String) -> String {
-    let latin = mutableLatinText(from: text)
+nonisolated private func transliteratedInitials(_ latin: String) -> String {
     return latin
         .split(separator: " ")
         .compactMap(\.first)
@@ -1094,27 +1141,27 @@ private func transliteratedInitials(_ text: String) -> String {
         .joined()
 }
 
-private func mutableLatinText(from text: String) -> String {
+nonisolated private func mutableLatinText(from text: String) -> String {
     let mutable = NSMutableString(string: text)
     CFStringTransform(mutable, nil, kCFStringTransformToLatin, false)
     CFStringTransform(mutable, nil, kCFStringTransformStripDiacritics, false)
     return normalizeSearch(mutable as String)
 }
 
-private func truncate(_ text: String, limit: Int) -> String {
+nonisolated private func truncate(_ text: String, limit: Int) -> String {
     guard text.count > limit else { return text }
     return String(text.prefix(limit)) + "…"
 }
 
-private func sha256(_ text: String) -> String {
+nonisolated private func sha256(_ text: String) -> String {
     sha256(Data(text.utf8))
 }
 
-private func sha256(_ data: Data) -> String {
+nonisolated private func sha256(_ data: Data) -> String {
     SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-private func pngData(for image: NSImage) -> Data? {
+nonisolated private func pngData(for image: NSImage) -> Data? {
     guard let tiffData = image.tiffRepresentation,
           let bitmap = NSBitmapImageRep(data: tiffData) else {
         return nil
@@ -1122,7 +1169,7 @@ private func pngData(for image: NSImage) -> Data? {
     return bitmap.representation(using: .png, properties: [:])
 }
 
-private func relativeDateText(from date: Date) -> String {
+nonisolated private func relativeDateText(from date: Date) -> String {
     let formatter = RelativeDateTimeFormatter()
     formatter.unitsStyle = .short
     formatter.locale = Locale(identifier: "zh_CN")

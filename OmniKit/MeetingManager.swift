@@ -12,9 +12,9 @@ import Foundation
 import NaturalLanguage
 import Speech
 
-private let speechRecognitionTargetRMS: Float = 0.12
-private let speechRecognitionMaximumGain: Float = 8.0
-private let speechRecognitionNoiseFloor: Float = 0.002
+nonisolated private let speechRecognitionTargetRMS: Float = 0.12
+nonisolated private let speechRecognitionMaximumGain: Float = 8.0
+nonisolated private let speechRecognitionNoiseFloor: Float = 0.002
 private let secondaryRecognitionFallbackDelay: TimeInterval = 3.5
 private let primaryRecognitionHoldInterval: TimeInterval = 1.2
 
@@ -87,7 +87,7 @@ private struct RecognitionCandidateAnalysis {
     let stats: TranscriptStats
 }
 
-struct MeetingRecord: Identifiable, Equatable, Codable {
+nonisolated struct MeetingRecord: Identifiable, Equatable, Codable, Sendable {
     let id: UUID
     let startedAt: Date
     var endedAt: Date?
@@ -116,6 +116,36 @@ private struct RecognitionCandidate {
     var segmentCount: Int = 0
     var isFinal = false
     var updatedAt = Date.distantPast
+}
+
+nonisolated final class RecognitionAudioSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requests: [String: SFSpeechAudioBufferRecognitionRequest] = [:]
+
+    func add(_ request: SFSpeechAudioBufferRecognitionRequest, for locale: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        requests[locale] = request
+    }
+
+    func remove(for locale: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        requests.removeValue(forKey: locale)
+    }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        for request in requests.values { request.append(buffer) }
+    }
+
+    func endAudio() {
+        lock.lock()
+        defer { lock.unlock() }
+        for request in requests.values { request.endAudio() }
+        requests.removeAll()
+    }
 }
 
 private struct DeepSeekSummaryService {
@@ -204,6 +234,8 @@ private struct DeepSeekSummaryService {
 final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, SFSpeechRecognizerDelegate {
     @Published var records: [MeetingRecord] = []
     @Published var isRecording = false
+    @Published private(set) var isStartingRecording = false
+    @Published private(set) var isFinishingRecording = false
     @Published var statusMessage = "准备就绪"
     @Published var playingRecordID: MeetingRecord.ID?
     @Published var isPlaybackPaused = false
@@ -211,9 +243,15 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     @Published private(set) var summaryErrors: [MeetingRecord.ID: String] = [:]
     @Published var deepSeekAPIKey: String {
         didSet {
-            OmniKitStore.shared.set(deepSeekAPIKey, forKey: Self.deepSeekAPIKeyDefaultsKey)
+            do {
+                try CredentialStore.save(deepSeekAPIKey, forKey: Self.deepSeekAPIKeyDefaultsKey)
+                credentialError = nil
+            } catch {
+                credentialError = "密钥存储失败：\(error.localizedDescription)"
+            }
         }
     }
+    @Published private(set) var credentialError: String?
     @Published var deepSeekModel: String {
         didSet {
             OmniKitStore.shared.set(deepSeekModel, forKey: Self.deepSeekModelDefaultsKey)
@@ -225,6 +263,9 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     private let audioEngine = AVAudioEngine()
     private var speechRecognizers: [String: SFSpeechRecognizer] = [:]
     private var recognitionRequests: [String: SFSpeechAudioBufferRecognitionRequest] = [:]
+    private var recognitionAudioSession: RecognitionAudioSession?
+    private var recognitionSessionID: UUID?
+    private var finishingTask: Task<Void, Never>?
     private var recognitionTasks: [String: SFSpeechRecognitionTask] = [:]
     private var recognitionCandidates: [String: RecognitionCandidate] = [:]
     private var recognitionLocaleOrder: [String] = []
@@ -235,6 +276,9 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     private var recordingAudioFile: AVAudioFile?
     private var audioPlayer: AVAudioPlayer?
     private let fileManager = FileManager.default
+    private let recordsQueue = DispatchQueue(label: "com.lch.OmniKit.MeetingRecords", qos: .utility)
+    private var pendingRecordsSave: Task<Void, Never>?
+    private var terminationObserver: NSObjectProtocol?
     private static let primaryRecognitionLanguageDefaultsKey = "meeting.recognition.language.primary"
     private static let secondaryRecognitionLanguageDefaultsKey = "meeting.recognition.language.secondary"
     private static let deepSeekAPIKeyDefaultsKey = "meeting.summary.deepseek.apiKey"
@@ -246,39 +290,76 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         let storedPrimary = Self.loadRecognitionLanguage(key: Self.primaryRecognitionLanguageDefaultsKey) ?? .chinese
         let storedSecondary = Self.loadRecognitionLanguage(key: Self.secondaryRecognitionLanguageDefaultsKey) ?? .english
         let normalizedLanguages = Self.normalizedRecognitionLanguages(primary: storedPrimary, secondary: storedSecondary)
-        deepSeekAPIKey = OmniKitStore.shared.string(forKey: Self.deepSeekAPIKeyDefaultsKey) ?? ""
+        let credential = CredentialStore.load(forKey: Self.deepSeekAPIKeyDefaultsKey)
+        deepSeekAPIKey = credential.value
+        credentialError = credential.error
         deepSeekModel = OmniKitStore.shared.string(forKey: Self.deepSeekModelDefaultsKey) ?? Self.defaultDeepSeekModel
         primaryRecognitionLanguage = normalizedLanguages.primary
         secondaryRecognitionLanguage = normalizedLanguages.secondary
         super.init()
         loadRecords()
+        terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if self.isRecording { self.stopRecording() }
+                if self.isFinishingRecording { self.finishRecording() }
+                if self.pendingRecordsSave != nil { self.saveRecords() }
+                self.recordsQueue.sync {}
+            }
+        }
+    }
+
+    deinit {
+        if let terminationObserver { NotificationCenter.default.removeObserver(terminationObserver) }
+        pendingRecordsSave?.cancel()
+        finishingTask?.cancel()
     }
 
     func startRecording() {
-        guard !isRecording else { return }
-
+        guard !isRecording, !isStartingRecording, !isFinishingRecording else { return }
+        isStartingRecording = true
         requestAuthorizationAndStart()
     }
 
     func stopRecording() {
-        guard isRecording else { return }
+        guard isRecording, !isFinishingRecording else { return }
 
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
-        endRecognitionSession()
         recordingAudioFile = nil
         isRecording = false
-        statusMessage = "录音已结束"
+        isFinishingRecording = true
+        statusMessage = "正在保存最后的转写内容..."
 
         if let activeRecordID,
            let index = records.firstIndex(where: { $0.id == activeRecordID }) {
             records[index].endedAt = Date()
+        }
+        recognitionAudioSession?.endAudio()
+        if recognitionTasks.isEmpty {
+            finishRecording()
+        } else {
+            let sessionID = recognitionSessionID
+            finishingTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                guard let self, self.recognitionSessionID == sessionID else { return }
+                self.finishRecording()
+            }
+        }
+    }
+
+    private func finishRecording() {
+        guard isFinishingRecording else { return }
+        if let activeRecordID,
+           let index = records.firstIndex(where: { $0.id == activeRecordID }) {
             if records[index].transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 records[index].transcript = "（无可用转写内容）"
             }
         }
-
+        endRecognitionSession()
         activeRecordID = nil
+        isFinishingRecording = false
+        statusMessage = "录音已结束"
         saveRecords()
     }
 
@@ -289,6 +370,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     func deleteRecord(_ id: MeetingRecord.ID) {
         if activeRecordID == id {
             stopRecording()
+            finishRecording()
         }
         if let url = record(for: id)?.audioFileURL {
             try? fileManager.removeItem(at: url)
@@ -460,6 +542,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
             guard let self else { return }
             Task { @MainActor in
                 guard speechStatus == .authorized else {
+                    self.isStartingRecording = false
                     self.statusMessage = "语音识别权限被拒绝，请在系统设置中允许。"
                     return
                 }
@@ -467,6 +550,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
                 AVCaptureDevice.requestAccess(for: .audio) { granted in
                     Task { @MainActor in
                         guard granted else {
+                            self.isStartingRecording = false
                             self.statusMessage = "麦克风权限被拒绝，请在系统设置中允许。"
                             return
                         }
@@ -478,6 +562,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     }
 
     private func beginRecognition() {
+        defer { isStartingRecording = false }
         let recognizers = preferredSpeechRecognizers()
         guard !recognizers.isEmpty else {
             statusMessage = "当前系统没有可用的语音识别语言。"
@@ -502,6 +587,10 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         saveRecords()
 
         endRecognitionSession()
+        let sessionID = UUID()
+        recognitionSessionID = sessionID
+        let audioSession = RecognitionAudioSession()
+        recognitionAudioSession = audioSession
         audioPlayer?.stop()
         playingRecordID = nil
         isPlaybackPaused = false
@@ -564,18 +653,14 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             let recognitionBuffer = boostedRecognitionBuffer(from: buffer) ?? buffer
 
-            if let self {
-                for localeIdentifier in self.recognitionTasks.keys {
-                    guard let request = self.recognitionRequests[localeIdentifier] else { continue }
-                    request.append(recognitionBuffer)
-                }
-            }
+            audioSession.append(recognitionBuffer)
 
             do {
                 try audioFile.write(from: buffer)
             } catch {
                 Task { @MainActor in
-                    self?.statusMessage = "写入录音失败：\(error.localizedDescription)"
+                    guard let self, self.recognitionSessionID == sessionID else { return }
+                    self.statusMessage = "写入录音失败：\(error.localizedDescription)"
                 }
             }
         }
@@ -585,6 +670,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
             try audioEngine.start()
         } catch {
             statusMessage = "无法启动录音：\(error.localizedDescription)"
+            inputNode.removeTap(onBus: 0)
             endRecognitionSession()
             recordingAudioFile = nil
             records.removeAll { $0.id == newRecord.id }
@@ -722,6 +808,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     }
 
     private func startRecognitionTaskIfPossible(for recognizer: SFSpeechRecognizer) {
+        guard isRecording, let sessionID = recognitionSessionID else { return }
         let locale = recognizer.locale
         let localeIdentifier = locale.identifier
         guard recognizer.isAvailable else { return }
@@ -736,14 +823,21 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         }
 
         recognitionRequests[localeIdentifier] = request
+        recognitionAudioSession?.add(request, for: localeIdentifier)
         recognitionTasks[localeIdentifier] = recognizer.recognitionTask(with: request) { [weak self] result, error in
             guard let self else { return }
             Task { @MainActor in
+                guard self.recognitionSessionID == sessionID else { return }
                 if let result {
                     self.updateRecognitionCandidate(locale: locale, result: result)
+                    if result.isFinal, self.isFinishingRecording {
+                        self.recognitionTasks[localeIdentifier] = nil
+                        self.recognitionRequests[localeIdentifier] = nil
+                        if self.recognitionTasks.isEmpty { self.finishRecording() }
+                    }
                 }
 
-                if let error {
+                if let error, self.recognitionSessionID == sessionID {
                     self.handleRecognitionError(error, locale: locale)
                 }
             }
@@ -847,7 +941,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
 
         guard records[index].transcript != candidate.text else { return }
         records[index].transcript = candidate.text
-        saveRecords()
+        saveRecords(immediately: false)
     }
 
     private func bestRecognitionCandidate() -> RecognitionCandidate? {
@@ -1109,6 +1203,12 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         let localeIdentifier = locale.identifier
         recognitionTasks[localeIdentifier] = nil
         recognitionRequests[localeIdentifier] = nil
+        recognitionAudioSession?.remove(for: localeIdentifier)
+
+        if recognitionTasks.isEmpty, isFinishingRecording {
+            finishRecording()
+            return
+        }
 
         if recognitionTasks.isEmpty, isRecording {
             statusMessage = "识别中断：\(recognitionLanguageSummary()) 通道都失败了。"
@@ -1118,9 +1218,11 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     }
 
     private func endRecognitionSession() {
-        for request in recognitionRequests.values {
-            request.endAudio()
-        }
+        recognitionSessionID = nil
+        finishingTask?.cancel()
+        finishingTask = nil
+        recognitionAudioSession?.endAudio()
+        recognitionAudioSession = nil
         for task in recognitionTasks.values {
             task.cancel()
         }
@@ -1151,12 +1253,27 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
         OmniKitDataLocation.meetingRecordsURL
     }
 
-    private func saveRecords() {
-        do {
-            let data = try JSONEncoder().encode(records)
-            try data.write(to: recordsFileURL(), options: .atomic)
-        } catch {
-            statusMessage = "保存录音记录失败：\(error.localizedDescription)"
+    private func saveRecords(immediately: Bool = true) {
+        if !immediately {
+            guard pendingRecordsSave == nil else { return }
+            pendingRecordsSave = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                self?.saveRecords()
+            }
+            return
+        }
+        pendingRecordsSave?.cancel()
+        pendingRecordsSave = nil
+        let snapshot = records
+        let url = recordsFileURL()
+        recordsQueue.async { [weak self] in
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                let message = "保存录音记录失败：\(error.localizedDescription)"
+                Task { @MainActor [weak self] in self?.statusMessage = message }
+            }
         }
     }
 
@@ -1183,6 +1300,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     nonisolated func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {
         Task { @MainActor [weak self] in
             guard let self else { return }
+            guard self.speechRecognizers[speechRecognizer.locale.identifier] === speechRecognizer else { return }
             if available {
                 if self.isRecording {
                     self.startRecognitionTaskIfPossible(for: speechRecognizer)
@@ -1195,7 +1313,7 @@ final class MeetingManager: NSObject, ObservableObject, AVAudioPlayerDelegate, S
     }
 }
 
-private func boostedRecognitionBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+nonisolated private func boostedRecognitionBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
     switch buffer.format.commonFormat {
     case .pcmFormatFloat32:
         return boostedFloatBuffer(from: buffer)
@@ -1208,7 +1326,7 @@ private func boostedRecognitionBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioP
     }
 }
 
-private func boostedFloatBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+nonisolated private func boostedFloatBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
     guard let sourceChannels = buffer.floatChannelData,
           let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: buffer.format,
@@ -1237,7 +1355,7 @@ private func boostedFloatBuffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuff
     return outputBuffer
 }
 
-private func boostedInt16Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+nonisolated private func boostedInt16Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
     guard let sourceChannels = buffer.int16ChannelData,
           let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: buffer.format,
@@ -1268,7 +1386,7 @@ private func boostedInt16Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuff
     return outputBuffer
 }
 
-private func boostedInt32Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+nonisolated private func boostedInt32Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
     guard let sourceChannels = buffer.int32ChannelData,
           let outputBuffer = AVAudioPCMBuffer(
             pcmFormat: buffer.format,
@@ -1299,7 +1417,7 @@ private func boostedInt32Buffer(from buffer: AVAudioPCMBuffer) -> AVAudioPCMBuff
     return outputBuffer
 }
 
-private func rmsLevelFloat32(
+nonisolated private func rmsLevelFloat32(
     channels: UnsafePointer<UnsafeMutablePointer<Float>>,
     channelCount: Int,
     frameCount: Int
@@ -1315,7 +1433,7 @@ private func rmsLevelFloat32(
     return sqrt(energy / Float(channelCount * frameCount))
 }
 
-private func rmsLevelInt16(
+nonisolated private func rmsLevelInt16(
     channels: UnsafePointer<UnsafeMutablePointer<Int16>>,
     channelCount: Int,
     frameCount: Int
@@ -1331,7 +1449,7 @@ private func rmsLevelInt16(
     return sqrt(energy / Float(channelCount * frameCount))
 }
 
-private func rmsLevelInt32(
+nonisolated private func rmsLevelInt32(
     channels: UnsafePointer<UnsafeMutablePointer<Int32>>,
     channelCount: Int,
     frameCount: Int
@@ -1347,7 +1465,7 @@ private func rmsLevelInt32(
     return sqrt(energy / Float(channelCount * frameCount))
 }
 
-private func recognitionGain(for rms: Float) -> Float {
+nonisolated private func recognitionGain(for rms: Float) -> Float {
     guard rms.isFinite, rms > speechRecognitionNoiseFloor else {
         return 1
     }
@@ -1356,6 +1474,6 @@ private func recognitionGain(for rms: Float) -> Float {
     return min(max(targetGain, 1), speechRecognitionMaximumGain)
 }
 
-private func clampedFloatSample(_ value: Float) -> Float {
+nonisolated private func clampedFloatSample(_ value: Float) -> Float {
     min(max(value, -0.97), 0.97)
 }

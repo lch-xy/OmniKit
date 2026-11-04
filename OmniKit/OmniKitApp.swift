@@ -24,11 +24,14 @@ struct OmniKitApp: App {
     @StateObject private var imagePanelManager: ImagePanelManager
     @StateObject private var clipboardPanelManager: ClipboardPanelManager
     @StateObject private var batteryManager = BatteryManager()
-    @StateObject private var menuBarIconManager = MenuBarIconManager()
-    @StateObject private var menuBarFolder = MenuBarFolderController()
+    @StateObject private var menuBarIconManager: MenuBarIconManager
+    @StateObject private var menuBarFolder: MenuBarFolderController
 
     init() {
         PreferencesMigrator.migrateIfNeeded()
+        let menuBarIconManager = MenuBarIconManager()
+        _menuBarIconManager = StateObject(wrappedValue: menuBarIconManager)
+        _menuBarFolder = StateObject(wrappedValue: MenuBarFolderController(iconManager: menuBarIconManager))
         let translationSettings = TranslationSettingsStore()
         let ocrSettings = OCRSettingsStore()
         let formatSettings = FormatSettingsStore()

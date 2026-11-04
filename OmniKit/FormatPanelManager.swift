@@ -285,15 +285,14 @@ final class FormatPanelViewModel: ObservableObject {
             statusMessage = "已生成 5 个身份证号"
             statusTint = .green
         case .encrypt, .decrypt:
-            let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else {
+            guard !inputText.isEmpty else {
                 statusMessage = "请输入内容"
                 statusTint = .orange
                 outputText = ""
                 return
             }
             do {
-                let result = try processCrypto(trimmed, mode: selectedType, algorithm: selectedCryptoAlgorithm)
+                let result = try processCrypto(inputText, mode: selectedType, algorithm: selectedCryptoAlgorithm)
                 outputText = result
                 statusMessage = selectedType == .encrypt ? "加密完成" : "解密完成"
                 statusTint = .green
@@ -306,10 +305,9 @@ final class FormatPanelViewModel: ObservableObject {
     }
 
     func copyResult() {
-        let trimmed = outputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !outputText.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(trimmed, forType: .string)
+        NSPasteboard.general.setString(outputText, forType: .string)
         statusMessage = "结果已复制"
         statusTint = .green
     }
@@ -432,7 +430,7 @@ final class FormatPanelViewModel: ObservableObject {
                 .map { String(format: "%02x", $0) }
                 .joined()
         case (.decrypt, .base64):
-            guard let data = Data(base64Encoded: content),
+            guard let data = Data(base64Encoded: content.trimmingCharacters(in: .whitespacesAndNewlines)),
                   let output = String(data: data, encoding: .utf8) else {
                 throw ConversionError.invalidBase64
             }

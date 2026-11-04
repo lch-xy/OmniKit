@@ -2,73 +2,31 @@
 //  MenuBarFolderController.swift
 //  OmniKit
 //
-//  "真·隐藏图标但不退出 App" 的实现。
-//
-//  背景：
-//  macOS 公共 API 不允许一个 App 去隐藏/移动另一个 App 的 NSStatusItem，
-//  因此 Bartender / Ice / Hidden Bar 这一类工具全部走同一条路：
-//    1) 自己在菜单栏里放一个"分隔符"状态栏项；
-//    2) 用户手动按住 ⌘ 拖动其他 App 的图标到分隔符的某一侧；
-//    3) 通过把分隔符自身的 `length` 拉得非常大，
-//       把分隔符左侧的图标挤出屏幕可视区域，从视觉上实现"折叠"。
-//
-//  OmniKit 的做法与 Hidden Bar 接近，但保留主 MenuBarExtra 不动，
-//  额外注入两个 NSStatusItem：
-//    - chevronItem：始终可见的折叠/展开按钮；
-//    - separatorItem：视觉上不可见的占位分隔符，折叠时通过超长 `length`
-//      把左侧图标推出可视区。
-//
-//  继承 NSObject 是**必须的**：NSStatusBarButton 通过 target/action 机制派发点击，
-//  需要 ObjC 运行时能在实例上调用到 `chevronClicked`。
-//
-//  关于"点击开关就卡死"的防御：
-//    SwiftUI Binding.set → @Published didSet → 同步创建 NSStatusItem，
-//    会让 AppKit 在 SwiftUI 的状态更新事务里做菜单栏 I/O，
-//    观察到会出现主线程卡住/事件循环死锁。
-//    这里改成用 DispatchQueue.main.async 把实际 install/uninstall 推到
-//    下一个 runloop 周期，让 SwiftUI 先把本次状态更新走完，再做 AppKit 重活。
-//
-//  持久化：
-//    - 是否启用折叠功能：OmniKitStore["omnikit.menubarFolder.isEnabled"]
-//    - 当前是否处于折叠态：OmniKitStore["omnikit.menubarFolder.isCollapsed"]
+//  先按收纳名单排列并核验，再加长分隔符折叠左侧图标。
+//  NSStatusItem 的安装仍放到下一轮 runloop，避免阻塞 SwiftUI 状态更新。
 //
 
 import AppKit
+import ApplicationServices
 import Combine
 import Foundation
 import os.log
 
 @MainActor
 final class MenuBarFolderController: NSObject, ObservableObject {
-
-    // MARK: - 持久化 key
-
     private static let enabledKey = "omnikit.menubarFolder.isEnabled"
     private static let collapsedKey = "omnikit.menubarFolder.isCollapsed"
-
-    /// 展开时 separator 的长度 —— 用 1pt 的极小宽度，几乎等同于不可见。
+    private static let separatorName = "omnikit.menubarFolder.separator"
     private static let expandedSeparatorLength: CGFloat = 1
-
-    /// 折叠时 separator 的长度：按当前主屏宽度 + 余量动态算，
-    /// 避免硬编码过大的值让 AppKit 在重布局时卡住。
-    private static func collapsedSeparatorLength() -> CGFloat {
-        let screenWidth = NSScreen.main?.frame.width ?? 1600
-        return max(screenWidth + 200, 1600)
-    }
-
     private static let logger = Logger(subsystem: "com.lch.OmniKit", category: "MenuBarFolder")
-
-    // MARK: - Published 状态
 
     @Published var isEnabled: Bool {
         didSet {
             guard oldValue != isEnabled else { return }
             OmniKitStore.shared.set(isEnabled, forKey: Self.enabledKey)
-            let targetEnabled = isEnabled
-            // 从 SwiftUI 的状态更新事务里抽出来，下一轮 runloop 再动菜单栏。
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if targetEnabled {
+                if self.isEnabled {
                     self.installStatusItems()
                 } else {
                     self.uninstallStatusItems()
@@ -77,119 +35,330 @@ final class MenuBarFolderController: NSObject, ObservableObject {
         }
     }
 
-    @Published private(set) var isCollapsed: Bool {
-        didSet {
-            guard oldValue != isCollapsed else { return }
-            OmniKitStore.shared.set(isCollapsed, forKey: Self.collapsedKey)
-            DispatchQueue.main.async { [weak self] in
-                self?.applyCollapsedState()
-            }
-        }
-    }
+    /// 实际显示状态；排列期间保持展开，不把“正在准备折叠”显示为已折叠。
+    @Published private(set) var isCollapsed = false
+    @Published private(set) var isArranging = false
+    @Published private(set) var statusMessage = "已展开：仅折叠标记收纳的图标。"
+    @Published private(set) var needsAccessibility = !AXIsProcessTrusted()
+    @Published private(set) var needsScreenRecording = !CGPreflightScreenCaptureAccess()
 
-    // MARK: - 私有状态
-
+    private let iconManager: MenuBarIconManager
     private var chevronItem: NSStatusItem?
     private var separatorItem: NSStatusItem?
+    private var collapseRequested: Bool
+    private var arrangementTask: Task<Void, Never>?
+    private var arrangementID = UUID()
+    private var subscriptions = Set<AnyCancellable>()
+    private var monitoring = Set<AnyCancellable>()
 
-    // MARK: - Init
-
-    override init() {
+    init(iconManager: MenuBarIconManager) {
+        self.iconManager = iconManager
         self.isEnabled = OmniKitStore.shared.bool(forKey: Self.enabledKey)
-        self.isCollapsed = OmniKitStore.shared.bool(forKey: Self.collapsedKey)
+        self.collapseRequested = OmniKitStore.shared.bool(forKey: Self.collapsedKey)
         super.init()
-        // 同样推到下一轮 runloop，避免在 App 启动的 scene 构建期间占主线程。
+        iconManager.$stashedItemIDs
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.scheduleArrangement() }
+            .store(in: &subscriptions)
         if isEnabled {
-            DispatchQueue.main.async { [weak self] in
-                self?.installStatusItems()
-            }
+            DispatchQueue.main.async { [weak self] in self?.installStatusItems() }
         }
-        Self.logger.log("init (enabled=\(self.isEnabled, privacy: .public), collapsed=\(self.isCollapsed, privacy: .public))")
     }
 
     // MARK: - Public API
 
     func toggleCollapsed() {
-        guard isEnabled else { return }
-        isCollapsed.toggle()
+        setCollapsed(!(isCollapsed || isArranging))
     }
 
     func setCollapsed(_ collapsed: Bool) {
         guard isEnabled else { return }
-        if isCollapsed != collapsed {
-            isCollapsed = collapsed
+        collapseRequested = collapsed
+        OmniKitStore.shared.set(collapsed, forKey: Self.collapsedKey)
+        if collapsed {
+            scheduleArrangement()
+        } else {
+            cancelArrangement()
+            applyCollapsedState(false)
+            statusMessage = "已展开：收纳区域已恢复显示。"
         }
     }
 
-    // MARK: - 安装 / 卸载 NSStatusItem
+    func requestAccessibilityPermission() {
+        AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func requestScreenRecordingPermission() {
+        CGRequestScreenCaptureAccess()
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: - 安装 / 卸载
 
     private func installStatusItems() {
-        guard separatorItem == nil, chevronItem == nil else {
-            Self.logger.log("install skipped: already installed")
-            return
-        }
-        Self.logger.log("install begin")
-
-        // 先创建 separator 再创建 chevron：macOS 按创建顺序从右向左排列，
-        // 最终视觉（自右向左）= [chevron] [separator] [用户⌘拖过来的图标]
+        guard isEnabled, separatorItem == nil, chevronItem == nil else { return }
         let separator = NSStatusBar.system.statusItem(withLength: Self.expandedSeparatorLength)
-        Self.logger.log("install step 1: separator item created")
         if let button = separator.button {
-            // 用一张 1x1 透明图占位，避免 button 被视作"无内容 item"而被 AppKit 忽略布局。
             button.image = Self.makeTransparentImage()
             button.title = ""
-            button.toolTip = "OmniKit 折叠分隔符：把想隐藏的图标按住 ⌘ 拖到这条分隔符的左侧"
+            button.toolTip = "OmniKit 收纳分隔符：按标记自动分组"
             button.target = self
             button.action = #selector(chevronClicked)
         }
-        // autosaveName 放在最后设，避免 AppKit 读取历史位置时触发 pref IO
-        // 把 target/action 之前的 button 改动吞掉。
-        separator.autosaveName = "omnikit.menubarFolder.separator"
-        self.separatorItem = separator
-        Self.logger.log("install step 2: separator configured")
+        separator.autosaveName = Self.separatorName
+        separatorItem = separator
 
         let chevron = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        Self.logger.log("install step 3: chevron item created")
         if let button = chevron.button {
             button.target = self
             button.action = #selector(chevronClicked)
-            button.toolTip = "点击折叠 / 展开 OmniKit 菜单栏分隔符左侧的图标"
+            button.toolTip = "折叠 / 展开已标记收纳的图标"
         }
         chevron.autosaveName = "omnikit.menubarFolder.chevron"
-        self.chevronItem = chevron
-        Self.logger.log("install step 4: chevron configured")
+        chevronItem = chevron
+        applyCollapsedState(false)
 
-        applyCollapsedState()
-        Self.logger.log("install done")
+        Timer.publish(every: 1, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.checkForChanges() }
+            .store(in: &monitoring)
+        // 通知只触发核验；图标位置正确时保持折叠，延迟创建的图标由定时检查兜底。
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            NSWorkspace.shared.notificationCenter.publisher(for: name)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.checkForChanges()
+                    self?.iconManager.refresh()
+                }
+                .store(in: &monitoring)
+        }
+        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.checkForChanges() }
+            .store(in: &monitoring)
+        scheduleArrangement()
     }
 
     private func uninstallStatusItems() {
-        Self.logger.log("uninstall begin")
-        if let separatorItem {
-            NSStatusBar.system.removeStatusItem(separatorItem)
-        }
-        if let chevronItem {
-            NSStatusBar.system.removeStatusItem(chevronItem)
-        }
+        cancelArrangement()
+        monitoring.removeAll()
+        applyCollapsedState(false)
+        if let separatorItem { NSStatusBar.system.removeStatusItem(separatorItem) }
+        if let chevronItem { NSStatusBar.system.removeStatusItem(chevronItem) }
         separatorItem = nil
         chevronItem = nil
-        Self.logger.log("uninstall done")
+        statusMessage = "折叠功能未启用。"
+    }
+
+    private func cancelArrangement() {
+        arrangementID = UUID()
+        arrangementTask?.cancel()
+        arrangementTask = nil
+        isArranging = false
+    }
+
+    // MARK: - 按名单排列和核验
+
+    private func checkPermissions() -> Bool {
+        let previouslyMissing = needsAccessibility || needsScreenRecording
+        needsAccessibility = !AXIsProcessTrusted()
+        needsScreenRecording = !CGPreflightScreenCaptureAccess()
+        if needsAccessibility || needsScreenRecording {
+            applyCollapsedState(false)
+            statusMessage = "请授予辅助功能和屏幕录制权限后折叠；当前保持展开。授权后如系统提示，请重新打开 OmniKit。"
+            return false
+        }
+        if previouslyMissing { iconManager.refresh() }
+        return true
+    }
+
+    private func checkForChanges() {
+        guard isEnabled, checkPermissions(), collapseRequested, arrangementTask == nil else { return }
+        guard let layout = currentLayout() else {
+            applyCollapsedState(false)
+            statusMessage = "暂时无法读取菜单栏，保持展开。"
+            return
+        }
+        guard layout.items.contains(where: { $0.isStashed(in: layout.selections) }) else {
+            applyCollapsedState(false)
+            statusMessage = "当前没有可折叠的已标记图标；未识别或标记有歧义的图标保持显示。"
+            return
+        }
+        let misplaced = layout.items.contains { !$0.isCorrectlyPlaced(relativeTo: layout.separator, selections: layout.selections) }
+        if !isCollapsed || misplaced {
+            scheduleArrangement()
+        }
+    }
+
+    private func currentLayout() -> (separator: MenuBarStatusItem, items: [MenuBarStatusItem], selections: Set<String>)? {
+        guard let windows = MenuBarStatusItem.current(),
+              let separator = windows.first(where: { $0.ownerPID == getpid() && $0.title == Self.separatorName }) else { return nil }
+        let items = windows.filter {
+            $0.windowID != separator.windowID &&
+            abs($0.frame.minY - separator.frame.minY) < 1 &&
+            abs($0.frame.height - separator.frame.height) < 1
+        }
+        return (separator, items, MenuBarStatusItem.unambiguousSelections(iconManager.stashedItemIDs, items: items))
+    }
+
+    private func scheduleArrangement() {
+        guard isEnabled, collapseRequested, separatorItem != nil else { return }
+        cancelArrangement()
+        applyCollapsedState(false)
+        guard checkPermissions() else { return }
+        isArranging = true
+        statusMessage = "正在按收纳标记排列图标…"
+        let id = arrangementID
+        arrangementTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.arrangementID == id {
+                    self.arrangementTask = nil
+                    self.isArranging = false
+                }
+            }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                try await self.arrangeMarkedItems()
+                try Task.checkCancellation()
+                guard self.arrangementID == id, self.isEnabled, self.collapseRequested, self.checkPermissions() else { return }
+                guard let layout = self.currentLayout() else { throw ArrangementError.unavailable }
+                let hasMarkedItems = layout.items.contains { $0.isStashed(in: layout.selections) }
+                guard !hasMarkedItems || layout.items.allSatisfy({ $0.isCorrectlyPlaced(relativeTo: layout.separator, selections: layout.selections) }) else {
+                    throw ArrangementError.unstable
+                }
+                self.applyCollapsedState(hasMarkedItems)
+                self.statusMessage = hasMarkedItems
+                    ? "已折叠：仅隐藏已标记图标，未标记和新出现的图标保持显示。"
+                    : "当前没有可折叠的已标记图标；未识别或标记有歧义的图标保持显示。"
+            } catch is CancellationError {
+                // 新的排列请求或用户展开已接管状态。
+            } catch {
+                guard self.arrangementID == id else { return }
+                self.applyCollapsedState(false)
+                self.collapseRequested = false
+                self.statusMessage = "排列未完成，保持展开：\(error.localizedDescription)"
+                Self.logger.error("Menu bar arrangement failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func arrangeMarkedItems() async throws {
+        // 每次移动后重新读取坐标，避免使用其他图标移动前的位置。
+        for _ in 0..<3 {
+            try Task.checkCancellation()
+            guard let layout = currentLayout() else { throw ArrangementError.unavailable }
+            iconManager.resolveLegacyStashedItems(using: layout.items)
+            let selections = MenuBarStatusItem.unambiguousSelections(iconManager.stashedItemIDs, items: layout.items)
+            guard layout.items.contains(where: { $0.isStashed(in: selections) }) else { return }
+            let misplaced = layout.items
+                .filter { !$0.isCorrectlyPlaced(relativeTo: layout.separator, selections: selections) }
+                .sorted { !$0.isStashed(in: selections) && $1.isStashed(in: selections) }
+            if misplaced.isEmpty {
+                try await Task.sleep(for: .milliseconds(150))
+                guard let verified = currentLayout() else { throw ArrangementError.unavailable }
+                if Set(verified.items.map(\.windowID)) == Set(layout.items.map(\.windowID)),
+                   verified.items.allSatisfy({ $0.isCorrectlyPlaced(relativeTo: verified.separator, selections: selections) }) { return }
+                continue
+            }
+            for item in misplaced {
+                for attempt in 0..<2 {
+                    try Task.checkCancellation()
+                    try await waitForMouseIdle()
+                    guard let latest = currentLayout() else { throw ArrangementError.unavailable }
+                    guard let current = latest.items.first(where: { $0.windowID == item.windowID }) else { break }
+                    if current.isCorrectlyPlaced(relativeTo: latest.separator, selections: latest.selections) { break }
+                    try await move(current, beside: latest.separator, toLeft: current.isStashed(in: latest.selections))
+                    guard let updated = currentLayout() else { throw ArrangementError.unavailable }
+                    guard let moved = updated.items.first(where: { $0.windowID == item.windowID }) else { break }
+                    if moved.isCorrectlyPlaced(relativeTo: updated.separator, selections: updated.selections) { break }
+                    if attempt == 1 { throw ArrangementError.moveFailed(current.title) }
+                }
+            }
+        }
+        throw ArrangementError.unstable
+    }
+
+    private func waitForMouseIdle() async throws {
+        for _ in 0..<30 {
+            try Task.checkCancellation()
+            let buttonsDown = NSEvent.pressedMouseButtons != 0
+            let modifiers = CGEventSource.flagsState(.combinedSessionState).intersection([.maskCommand, .maskAlternate, .maskControl, .maskShift])
+            if !buttonsDown, modifiers.isEmpty,
+               CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .mouseMoved) >= 0.25 { return }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw ArrangementError.mouseBusy
+    }
+
+    private func move(_ item: MenuBarStatusItem, beside separator: MenuBarStatusItem, toLeft: Bool) async throws {
+        // 被刘海或拥挤菜单栏遮住的图标仍可按窗口 ID 移动，不能依赖屏幕命中测试。
+        let start = CGPoint(x: 20000, y: 20000)
+        let end = CGPoint(x: toLeft ? separator.frame.minX : separator.frame.maxX, y: separator.frame.midY)
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let cursor = CGEvent(source: nil)?.location,
+              let down = mouseEvent(.leftMouseDown, at: start, windowID: item.windowID, ownerPID: item.ownerPID, source: source),
+              let up = mouseEvent(.leftMouseUp, at: end, windowID: separator.windowID, ownerPID: item.ownerPID, source: source),
+              let cancel = mouseEvent(.leftMouseUp, at: item.frame.origin, windowID: item.windowID, ownerPID: item.ownerPID, source: source) else { throw ArrangementError.unavailable }
+        var released = false
+        defer {
+            if !released {
+                cancel.post(tap: .cgSessionEventTap)
+                cancel.postToPid(item.ownerPID)
+            }
+            CGWarpMouseCursorPosition(cursor)
+        }
+        // 会话先更新拖动状态，再把事件交给源图标进程；松开事件使用目标窗口。
+        down.post(tap: .cgSessionEventTap)
+        try await Task.sleep(for: .milliseconds(30))
+        down.postToPid(item.ownerPID)
+        try await Task.sleep(for: .milliseconds(150))
+        up.post(tap: .cgSessionEventTap)
+        try await Task.sleep(for: .milliseconds(30))
+        up.postToPid(item.ownerPID)
+        released = true
+        try await Task.sleep(for: .milliseconds(200))
+    }
+
+    private func mouseEvent(_ type: CGEventType, at point: CGPoint, windowID: CGWindowID, ownerPID: pid_t, source: CGEventSource) -> CGEvent? {
+        guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return nil }
+        event.flags = type == .leftMouseUp ? [] : .maskCommand
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(ownerPID))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(windowID))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(windowID))
+        // NSEvent.windowNumber 的底层字段，用于将按下事件投递给具体状态栏窗口。
+        if let field = CGEventField(rawValue: 0x33) { event.setIntegerValueField(field, value: Int64(windowID)) }
+        return event
+    }
+
+    private enum ArrangementError: LocalizedError {
+        case unavailable, unstable, mouseBusy
+        case moveFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unavailable: return "无法读取菜单栏图标，请确认权限后重试。"
+            case .unstable: return "菜单栏仍在变化，请稍后重试。"
+            case .mouseBusy: return "鼠标或修饰键正在使用，请松开后重试。"
+            case .moveFailed(let name): return "未能移动图标 \(name)，请稍后重试。"
+            }
+        }
     }
 
     // MARK: - 状态应用
 
-    private func applyCollapsedState() {
-        Self.logger.log("applyCollapsedState begin (collapsed=\(self.isCollapsed, privacy: .public))")
-        guard let separatorItem, let chevronItem else {
-            Self.logger.log("applyCollapsedState skipped: items not installed")
-            return
-        }
-        let targetLength: CGFloat = isCollapsed ? Self.collapsedSeparatorLength() : Self.expandedSeparatorLength
-        Self.logger.log("applyCollapsedState: setting separator.length = \(targetLength, privacy: .public)")
-        separatorItem.length = targetLength
-        Self.logger.log("applyCollapsedState: separator.length set OK")
+    private func applyCollapsedState(_ collapsed: Bool) {
+        guard let separatorItem, let chevronItem else { return }
+        isCollapsed = collapsed
+        let screenWidth = separatorItem.button?.window?.screen?.frame.width ?? NSScreen.main?.frame.width ?? 1600
+        separatorItem.length = collapsed ? max(screenWidth + 200, 1600) : Self.expandedSeparatorLength
         updateChevronAppearance(on: chevronItem)
-        Self.logger.log("applyCollapsedState done")
     }
 
     private func updateChevronAppearance(on item: NSStatusItem) {

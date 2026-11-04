@@ -115,9 +115,15 @@ final class TranslationSettingsStore: ObservableObject {
 
     @Published var accessKeySecret: String {
         didSet {
-            OmniKitStore.shared.set(accessKeySecret, forKey: Self.accessKeySecretDefaultsKey)
+            do {
+                try CredentialStore.save(accessKeySecret, forKey: Self.accessKeySecretDefaultsKey)
+                credentialError = nil
+            } catch {
+                credentialError = "密钥存储失败：\(error.localizedDescription)"
+            }
         }
     }
+    @Published private(set) var credentialError: String?
 
     @Published var inputTranslationShortcut: ShortcutCombination {
         didSet {
@@ -152,7 +158,9 @@ final class TranslationSettingsStore: ObservableObject {
 
     init() {
         accessKeyId = OmniKitStore.shared.string(forKey: Self.accessKeyIdDefaultsKey) ?? ""
-        accessKeySecret = OmniKitStore.shared.string(forKey: Self.accessKeySecretDefaultsKey) ?? ""
+        let credential = CredentialStore.load(forKey: Self.accessKeySecretDefaultsKey)
+        accessKeySecret = credential.value
+        credentialError = credential.error
         let storedInputShortcut = Self.loadShortcut(key: Self.inputShortcutDefaultsKey)
         let storedSelectionShortcut = Self.loadShortcut(key: Self.selectionShortcutDefaultsKey)
         inputTranslationShortcut = storedInputShortcut == .legacyDefaultInput ? .defaultInput : (storedInputShortcut ?? .defaultInput)

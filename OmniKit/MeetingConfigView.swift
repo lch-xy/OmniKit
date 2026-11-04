@@ -43,6 +43,7 @@ struct MeetingConfigView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(meetingManager.isRecording ? .red : .accentColor)
+                    .disabled(meetingManager.isStartingRecording || meetingManager.isFinishingRecording)
                 }
             }
 
@@ -99,7 +100,9 @@ struct MeetingConfigView: View {
 
                 SettingsRow("保存配置", systemImage: "tray.and.arrow.down") {
                     HStack {
-                        if !deepSeekSaveMessage.isEmpty {
+                        if let error = meetingManager.credentialError {
+                            SettingsInfoBadge(text: error, tint: .red)
+                        } else if !deepSeekSaveMessage.isEmpty {
                             SettingsInfoBadge(text: deepSeekSaveMessage, tint: .green)
                         }
                         Button("保存") {

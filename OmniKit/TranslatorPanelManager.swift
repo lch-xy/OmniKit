@@ -24,6 +24,7 @@ final class TranslatorPanelManager: ObservableObject {
     private var panel: TranslatorFloatingPanel?
     private var panelViewModel: TranslatorPanelViewModel?
     private var notificationObservers: [NSObjectProtocol] = []
+    private var selectionTask: Task<Void, Never>?
 
     init(settings: TranslationSettingsStore) {
         self.settings = settings
@@ -32,6 +33,7 @@ final class TranslatorPanelManager: ObservableObject {
     }
 
     deinit {
+        selectionTask?.cancel()
         let center = NotificationCenter.default
         for observer in notificationObservers {
             center.removeObserver(observer)
@@ -90,6 +92,7 @@ final class TranslatorPanelManager: ObservableObject {
 
     private func togglePanel() {
         if let panel, panel.isVisible {
+            panelViewModel?.cancelTranslation()
             panel.orderOut(nil)
             return
         }
@@ -108,6 +111,7 @@ final class TranslatorPanelManager: ObservableObject {
                 defer: false
             )
             newPanel.applyPinnedState(pinState.isPinned)
+            newPanel.onClose = { [weak viewModel] in viewModel?.cancelTranslation() }
             newPanel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             newPanel.isMovableByWindowBackground = true
             newPanel.backgroundColor = .clear
@@ -140,16 +144,20 @@ final class TranslatorPanelManager: ObservableObject {
     }
 
     private func handleSelectionTranslationTrigger() {
-        if let selectedText = captureSelectedText(), !selectedText.isEmpty {
-            showPanel(prefillText: selectedText, autoSubmit: true)
-        } else {
-            showPanel(prefillText: "", autoSubmit: false)
+        guard selectionTask == nil else { return }
+        selectionTask = Task { [weak self] in
+            guard let self else { return }
+            defer { selectionTask = nil }
+            let selectedText = await captureSelectedText() ?? ""
+            guard !Task.isCancelled else { return }
+            showPanel(prefillText: selectedText, autoSubmit: !selectedText.isEmpty)
         }
     }
 
-    private func captureSelectedText() -> String? {
+    private func captureSelectedText() async -> String? {
         let pasteboard = NSPasteboard.general
-        let backup = pasteboard.string(forType: .string)
+        guard AXIsProcessTrusted(), let backup = Self.snapshotItems(from: pasteboard) else { return nil }
+        let previousChangeCount = pasteboard.changeCount
 
         let source = CGEventSource(stateID: .combinedSessionState)
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true) // C
@@ -159,18 +167,45 @@ final class TranslatorPanelManager: ObservableObject {
         keyDown?.post(tap: .cghidEventTap)
         keyUp?.post(tap: .cghidEventTap)
 
-        RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+        for _ in 0..<25 {
+            if pasteboard.changeCount != previousChangeCount || Task.isCancelled { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        guard pasteboard.changeCount != previousChangeCount else { return nil }
+        let copiedChangeCount = pasteboard.changeCount
         let selected = pasteboard.string(forType: .string)
 
-        pasteboard.clearContents()
-        if let backup {
-            pasteboard.setString(backup, forType: .string)
+        if pasteboard.changeCount == copiedChangeCount {
+            pasteboard.clearContents()
+            pasteboard.writeObjects(backup)
         }
         return selected?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func snapshotItems(from pasteboard: NSPasteboard) -> [NSPasteboardItem]? {
+        var snapshot: [NSPasteboardItem] = []
+        for item in pasteboard.pasteboardItems ?? [] {
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                // 系统可能声明无法提供数据的派生格式，保留实际可读取的表示。
+                guard let data = item.data(forType: type) else { continue }
+                copy.setData(data, forType: type)
+            }
+            guard !copy.types.isEmpty else { return nil }
+            snapshot.append(copy)
+        }
+        return snapshot
     }
 }
 
 private final class TranslatorFloatingPanel: NSPanel {
+    var onClose: (() -> Void)?
+
+    override func close() {
+        onClose?()
+        super.close()
+    }
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
     override var titlebarAppearsTransparent: Bool {
@@ -210,6 +245,8 @@ final class TranslatorPanelViewModel: ObservableObject {
     private let settings: TranslationSettingsStore
     private let service: AlibabaTranslationService
     private let speechSynthesizer = NSSpeechSynthesizer()
+    private var translationTask: Task<Void, Never>?
+    private var currentRequestID: UUID?
 
     init(settings: TranslationSettingsStore, service: AlibabaTranslationService) {
         self.settings = settings
@@ -217,6 +254,7 @@ final class TranslatorPanelViewModel: ObservableObject {
     }
 
     func prepareForDisplay(prefillText: String, autoSubmit: Bool) {
+        cancelTranslation()
         inputText = prefillText
         outputText = ""
         errorMessage = ""
@@ -230,6 +268,7 @@ final class TranslatorPanelViewModel: ObservableObject {
     }
 
     func submit() {
+        cancelTranslation()
         let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         guard !settings.accessKeyId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -238,32 +277,49 @@ final class TranslatorPanelViewModel: ObservableObject {
             return
         }
 
+        let requestID = UUID()
+        currentRequestID = requestID
+        let accessKeyId = settings.accessKeyId
+        let accessKeySecret = settings.accessKeySecret
+        let source = resolvedSourceLanguage(for: content)
+        let target = resolvedTargetLanguage(for: content)
+        let apiVersion = settings.apiVersion.rawValue
+        let formatType = settings.formatType.rawValue
         isTranslating = true
         errorMessage = ""
 
-        Task {
+        translationTask = Task {
+            defer {
+                if currentRequestID == requestID {
+                    isTranslating = false
+                    translationTask = nil
+                }
+            }
             do {
                 let translated = try await service.translate(
                     text: content,
-                    accessKeyId: settings.accessKeyId,
-                    accessKeySecret: settings.accessKeySecret,
-                    sourceLanguage: resolvedSourceLanguage(for: content),
-                    targetLanguage: resolvedTargetLanguage(for: content),
-                    apiVersion: settings.apiVersion.rawValue,
-                    formatType: settings.formatType.rawValue
+                    accessKeyId: accessKeyId,
+                    accessKeySecret: accessKeySecret,
+                    sourceLanguage: source,
+                    targetLanguage: target,
+                    apiVersion: apiVersion,
+                    formatType: formatType
                 )
-                await MainActor.run {
-                    self.outputText = translated
-                    self.isTranslating = false
-                    self.focusInput = false
-                }
+                guard !Task.isCancelled, currentRequestID == requestID else { return }
+                outputText = translated
+                focusInput = false
             } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                    self.isTranslating = false
-                }
+                guard !Task.isCancelled, currentRequestID == requestID else { return }
+                errorMessage = error.localizedDescription
             }
         }
+    }
+
+    func cancelTranslation() {
+        currentRequestID = nil
+        translationTask?.cancel()
+        translationTask = nil
+        isTranslating = false
     }
 
     func swapLanguages() {
