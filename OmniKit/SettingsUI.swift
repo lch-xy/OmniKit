@@ -5,6 +5,41 @@
 
 import SwiftUI
 
+enum OmniKitTheme {
+    static let background = Color.white
+    static let sidebar = Color.white
+    static let surface = Color.white
+    static let input = Color.white
+    static let accent = Color.blue
+    static let blue = Color(red: 0.2, green: 0.42, blue: 0.86)
+    static let text = Color(red: 0.12, green: 0.12, blue: 0.13)
+    static let secondary = Color(red: 0.45, green: 0.45, blue: 0.47)
+    static let border = Color(red: 0.88, green: 0.88, blue: 0.89)
+}
+
+struct OmniKitButtonStyle: ButtonStyle {
+    var prominent = false
+    var tint: Color = OmniKitTheme.accent
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 12, weight: .semibold))
+            .padding(.horizontal, 13)
+            .padding(.vertical, 8)
+            .foregroundStyle(prominent ? Color.white : OmniKitTheme.text)
+            .background {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(prominent ? tint : OmniKitTheme.surface)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(prominent ? tint.opacity(0.6) : OmniKitTheme.border, lineWidth: 1)
+            }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.72 : 1) : 0.4)
+    }
+}
+
 struct SettingsCanvas<Content: View>: View {
     @ViewBuilder let content: Content
 

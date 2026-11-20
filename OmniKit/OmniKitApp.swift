@@ -24,6 +24,7 @@ struct OmniKitApp: App {
     @StateObject private var imagePanelManager: ImagePanelManager
     @StateObject private var clipboardPanelManager: ClipboardPanelManager
     @StateObject private var batteryManager = BatteryManager()
+    @StateObject private var appDimmingManager = AppDimmingManager()
     @StateObject private var menuBarIconManager: MenuBarIconManager
     @StateObject private var menuBarFolder: MenuBarFolderController
 
@@ -88,6 +89,7 @@ struct OmniKitApp: App {
                 .environmentObject(batteryManager)
                 .environmentObject(menuBarIconManager)
                 .environmentObject(menuBarFolder)
+                .environmentObject(appDimmingManager)
         }
         MenuBarExtra {
             MenuBarControlView()

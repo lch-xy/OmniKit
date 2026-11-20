@@ -23,6 +23,7 @@ struct ContentView: View {
     @EnvironmentObject private var batteryManager: BatteryManager
     @EnvironmentObject private var menuBarIconManager: MenuBarIconManager
     @EnvironmentObject private var menuBarFolder: MenuBarFolderController
+    @EnvironmentObject private var appDimmingManager: AppDimmingManager
 
     @State private var selectedModule: SettingsModule? = .translation
 
@@ -91,6 +92,9 @@ struct ContentView: View {
             IconConfigView()
                 .environmentObject(menuBarIconManager)
                 .environmentObject(menuBarFolder)
+        case .appDimming:
+            AppDimmingConfigView()
+                .environmentObject(appDimmingManager)
         }
     }
 
@@ -121,6 +125,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
     case clipboard
     case battery
     case icon
+    case appDimming
 
     var id: Self { self }
     var title: String {
@@ -134,6 +139,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
         case .clipboard: return "剪贴板"
         case .battery: return "电池"
         case .icon: return "图标"
+        case .appDimming: return "软件淡化"
         }
     }
     var icon: String {
@@ -147,6 +153,7 @@ private enum SettingsModule: CaseIterable, Identifiable {
         case .clipboard: return "doc.on.clipboard"
         case .battery: return "battery.100percent"
         case .icon: return "menubar.rectangle"
+        case .appDimming: return "rectangle.on.rectangle"
         }
     }
 }
@@ -177,4 +184,5 @@ private enum SettingsModule: CaseIterable, Identifiable {
         .environmentObject(ClipboardPanelManager(settings: clipboardSettings))
         .environmentObject(batteryManager)
         .environmentObject(menuBarIconManager)
+        .environmentObject(AppDimmingManager())
 }
