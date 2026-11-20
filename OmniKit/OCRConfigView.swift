@@ -48,7 +48,7 @@ struct OCRConfigView: View {
             }
 
             SettingsSection(title: "操作与状态") {
-                SettingsRow("预览识别结果", systemImage: "text.page", description: "开启后识别完成会弹出可编辑预览窗口") {
+                SettingsRow("预览识别结果", systemImage: "doc.text", description: "开启后识别完成会弹出可编辑预览窗口") {
                     Toggle("", isOn: $ocrSettings.shouldPreviewResult)
                         .labelsHidden()
                 }

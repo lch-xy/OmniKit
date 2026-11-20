@@ -15,7 +15,7 @@ struct BatteryConfigView: View {
                 subtitle: "监控当前电池状态，设置最大充电百分比，并在超过阈值时给出明确提示。"
             ) {
                 VStack(alignment: .trailing, spacing: 6) {
-                    Image(systemName: "battery.100percent")
+                    Image(systemName: "battery.100")
                         .font(.system(size: 28))
                         .foregroundStyle(Color.accentColor.opacity(0.85))
                     Text(batteryManager.currentChargeText)
@@ -52,7 +52,7 @@ struct BatteryConfigView: View {
             }
 
             SettingsSection(title: "当前状态") {
-                SettingsRow("电池电量", systemImage: "battery.100percent", description: batteryManager.statusMessage) {
+                SettingsRow("电池电量", systemImage: "battery.100", description: batteryManager.statusMessage) {
                     SettingsInfoBadge(text: batteryManager.currentChargeText, tint: statusTint)
                 }
 

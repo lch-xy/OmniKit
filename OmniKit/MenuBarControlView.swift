@@ -47,7 +47,7 @@ struct MenuBarControlView: View {
                 Button {
                     formatPanelManager.presentPanel()
                 } label: {
-                    Label("格式转换", systemImage: "arrow.trianglehead.2.clockwise.rotate.90")
+                    Label("格式转换", systemImage: "arrow.triangle.2.circlepath")
                 }
 
                 Button {

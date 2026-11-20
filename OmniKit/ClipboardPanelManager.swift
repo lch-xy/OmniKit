@@ -1023,13 +1023,13 @@ private struct HighlightedText: View {
 
         return Text(prefix)
             .font(font)
-            .foregroundStyle(color)
+            .foregroundColor(color)
         + Text(matched)
             .font(font.weight(.semibold))
-            .foregroundStyle(Color.accentColor)
+            .foregroundColor(Color.accentColor)
         + Text(suffix)
             .font(font)
-            .foregroundStyle(color)
+            .foregroundColor(color)
     }
 }
 

@@ -18,7 +18,7 @@ struct FormatConfigView: View {
                 title: "格式转换",
                 subtitle: "通过全局快捷键呼出转换弹窗，支持 JSON 提取格式化、随机生成 UUID/身份证号，以及 Base64、MD5、URL、转义和 Unicode 等文本处理。"
             ) {
-                Image(systemName: "arrow.trianglehead.2.clockwise.rotate.90")
+                Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 30))
                     .foregroundStyle(Color.accentColor.opacity(0.8))
             }

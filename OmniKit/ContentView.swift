@@ -147,11 +147,11 @@ private enum SettingsModule: CaseIterable, Identifiable {
         case .translation: return "globe"
         case .ocr: return "text.viewfinder"
         case .meeting: return "person.2.wave.2"
-        case .format: return "arrow.trianglehead.2.clockwise.rotate.90"
+        case .format: return "arrow.triangle.2.circlepath"
         case .textDiff: return "rectangle.split.2x1"
         case .image: return "photo.on.rectangle.angled"
         case .clipboard: return "doc.on.clipboard"
-        case .battery: return "battery.100percent"
+        case .battery: return "battery.100"
         case .icon: return "menubar.rectangle"
         case .appDimming: return "rectangle.on.rectangle"
         }

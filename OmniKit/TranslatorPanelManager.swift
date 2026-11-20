@@ -640,7 +640,7 @@ private struct TranslatorQuickPanelView: View {
         }
         .frame(minWidth: 500, minHeight: 320)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: viewModel.focusInput) { _, newValue in
+        .onChange(of: viewModel.focusInput) { newValue in
             inputFocused = newValue
         }
         .onAppear {

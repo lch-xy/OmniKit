@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-import SwiftData
 
 @main
 struct OmniKitApp: App {
@@ -29,6 +28,7 @@ struct OmniKitApp: App {
     @StateObject private var menuBarFolder: MenuBarFolderController
 
     init() {
+        OmniKitDataLocation.ensureDirectoriesExist()
         PreferencesMigrator.migrateIfNeeded()
         let menuBarIconManager = MenuBarIconManager()
         _menuBarIconManager = StateObject(wrappedValue: menuBarIconManager)
@@ -52,23 +52,6 @@ struct OmniKitApp: App {
         _imagePanelManager = StateObject(wrappedValue: ImagePanelManager(settings: imageSettings))
         _clipboardPanelManager = StateObject(wrappedValue: ClipboardPanelManager(settings: clipboardSettings))
     }
-
-    var sharedModelContainer: ModelContainer = {
-        OmniKitDataLocation.ensureDirectoriesExist()
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(
-            schema: schema,
-            url: OmniKitDataLocation.swiftDataStoreURL
-        )
-
-        do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
-        } catch {
-            fatalError("Could not create ModelContainer: \(error)")
-        }
-    }()
 
     var body: some Scene {
         Window("OmniKit", id: OmniKitSceneID.mainWindow) {
@@ -106,6 +89,5 @@ struct OmniKitApp: App {
             Label("OmniKit", systemImage: meetingManager.isRecording ? "record.circle.fill" : "cube.transparent")
                 .labelStyle(.iconOnly)
         }
-        .modelContainer(sharedModelContainer)
     }
 }

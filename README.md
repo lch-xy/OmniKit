@@ -26,7 +26,7 @@ macOS 菜单栏效率工具箱，把翻译、OCR、会议转写、格式工具�
 
 **环境要求**
 
-- macOS 15.7 或更高版本  
+- macOS 13.5 或更高版本
 - Xcode 16 或更高版本（自行从源码构建时）
 
 **安装与运行**
@@ -76,7 +76,7 @@ A macOS menu bar productivity app that bundles translation, OCR, meeting transcr
 
 **Requirements**
 
-- macOS 15.7 or later  
+- macOS 13.5 or later
 - Xcode 16 or later (when building from source)
 
 **Build and run**

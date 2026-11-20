@@ -822,7 +822,7 @@ private struct FormatQuickPanelView: View {
         .onAppear {
             inputFocused = viewModel.selectedType.requiresInput
         }
-        .onChange(of: viewModel.selectedType) { _, newValue in
+        .onChange(of: viewModel.selectedType) { newValue in
             inputFocused = newValue.requiresInput
             viewModel.normalizeCryptoSelection()
         }

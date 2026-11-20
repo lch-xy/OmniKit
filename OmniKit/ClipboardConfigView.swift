@@ -48,7 +48,7 @@ struct ClipboardConfigView: View {
             }
 
             SettingsSection(title: "历史状态") {
-                SettingsRow("当前记录数", systemImage: "clock.arrow.trianglehead.counterclockwise.rotate.90") {
+                SettingsRow("当前记录数", systemImage: "clock.arrow.circlepath") {
                     Text("\(clipboardPanelManager.totalCount)")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.secondary)

@@ -118,7 +118,7 @@ struct MeetingConfigView: View {
             SettingsSection(title: "录音历史") {
                 if meetingManager.records.isEmpty {
                     VStack(spacing: 12) {
-                        Image(systemName: "waveform.badge.mic")
+                        Image(systemName: "waveform")
                             .font(.system(size: 24))
                             .foregroundStyle(.tertiary)
                         Text("暂无录音记录")
@@ -177,7 +177,7 @@ struct MeetingConfigView: View {
             draftDeepSeekAPIKey = meetingManager.deepSeekAPIKey
             draftDeepSeekModel = meetingManager.deepSeekModel
         }
-        .onChange(of: meetingManager.records.count) { _, _ in
+        .onChange(of: meetingManager.records.count) { _ in
             adjustCurrentPageIfNeeded()
         }
         .sheet(isPresented: presentedTranscriptBinding) {
