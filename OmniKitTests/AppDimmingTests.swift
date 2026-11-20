@@ -73,6 +73,94 @@ struct AppDimmingTests {
         reloaded.isEnabled = false
     }
 
+    @Test func legacyConfigurationDefaultsMaskToWhiteAndPreservesRulesAndEffect() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configURL = storeURL(in: root)
+        let store = OmniKitStore(fileURL: configURL)
+        let legacyRule = AppDimmingRule(bundleID: "test.omnikit.legacy-color", name: "Legacy Color App", strength: 37)
+        store.set(try JSONEncoder().encode([legacyRule]), forKey: "omnikit.appDimming.rules")
+        store.set(AppDisplayEffect.transparency.rawValue, forKey: "omnikit.appDimming.effect")
+        store.set(false, forKey: "omnikit.appDimming.isEnabled")
+        try store.synchronize()
+
+        let manager = AppDimmingManager(store: store)
+        #expect(manager.maskColor == .white)
+        #expect(manager.rules.count == 1)
+        #expect(manager.rules[0].bundleID == legacyRule.bundleID)
+        #expect(manager.rules[0].strength == 37)
+        #expect(manager.effect == .transparency)
+        manager.maskColor = AppDimmingColor(red: 23, green: 117, blue: 209)
+        #expect(manager.rules[0].strength == 37)
+        #expect(manager.effect == .transparency)
+
+        try store.synchronize()
+        let reloaded = AppDimmingManager(store: OmniKitStore(fileURL: configURL))
+        #expect(reloaded.maskColor == AppDimmingColor(red: 23, green: 117, blue: 209))
+        #expect(reloaded.rules[0].strength == 37)
+        #expect(reloaded.effect == .transparency)
+        manager.isEnabled = false
+        reloaded.isEnabled = false
+    }
+
+    @Test func customSRGBColorRoundTripsThroughManagerAndStore() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configURL = storeURL(in: root)
+        let store = OmniKitStore(fileURL: configURL)
+        let manager = AppDimmingManager(store: store)
+        manager.isEnabled = false
+        let appURL = try makeApplication(in: root, bundleID: "test.omnikit.color", name: "Color Test App")
+        #expect(manager.addApplication(at: appURL))
+
+        let rgb = AppDimmingColor(red: 23, green: 117, blue: 209)
+        let bridged = try #require(AppDimmingColor(nsColor: rgb.nsColor))
+        #expect(bridged == rgb)
+        let srgb = try #require(rgb.nsColor.usingColorSpace(.sRGB))
+        #expect(Int((srgb.redComponent * 255).rounded()) == 23)
+        #expect(Int((srgb.greenComponent * 255).rounded()) == 117)
+        #expect(Int((srgb.blueComponent * 255).rounded()) == 209)
+
+        let originalRules = manager.rules
+        let originalEffect = manager.effect
+        manager.maskColor = rgb
+        #expect(manager.rules.count == originalRules.count)
+        #expect(manager.rules[0].bundleID == originalRules[0].bundleID)
+        #expect(manager.rules[0].strength == originalRules[0].strength)
+        #expect(manager.effect == originalEffect)
+        try store.synchronize()
+
+        let reloaded = AppDimmingManager(store: OmniKitStore(fileURL: configURL))
+        #expect(reloaded.maskColor == rgb)
+        #expect(reloaded.rules.count == originalRules.count)
+        #expect(reloaded.rules[0].bundleID == originalRules[0].bundleID)
+        #expect(reloaded.rules[0].strength == originalRules[0].strength)
+        #expect(reloaded.effect == originalEffect)
+        reloaded.isEnabled = false
+    }
+
+    @Test func maskColorPersistsAcrossTransparencyModeChanges() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let configURL = storeURL(in: root)
+        let store = OmniKitStore(fileURL: configURL)
+        let manager = AppDimmingManager(store: store)
+        manager.isEnabled = false
+        let color = AppDimmingColor(red: 23, green: 117, blue: 209)
+
+        manager.maskColor = color
+        manager.effect = .transparency
+        #expect(manager.maskColor == color)
+        manager.effect = .dimming
+        #expect(manager.maskColor == color)
+        try store.synchronize()
+
+        let reloaded = AppDimmingManager(store: OmniKitStore(fileURL: configURL))
+        #expect(reloaded.maskColor == color)
+        #expect(reloaded.effect == .dimming)
+        reloaded.isEnabled = false
+    }
+
     private func temporaryDirectory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("OmniKit-AppDimming-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

@@ -22,16 +22,53 @@ struct AppDimmingRule: Codable, Identifiable {
     var id: String { bundleID }
 }
 
+struct AppDimmingColor: Codable, Equatable {
+    let red: UInt8
+    let green: UInt8
+    let blue: UInt8
+
+    static let white = AppDimmingColor(red: 255, green: 255, blue: 255)
+
+    var nsColor: NSColor {
+        NSColor(srgbRed: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1)
+    }
+
+    init(red: UInt8, green: UInt8, blue: UInt8) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+    }
+
+    init?(nsColor: NSColor) {
+        guard let color = nsColor.usingColorSpace(.sRGB) else { return nil }
+        red = UInt8((min(1, max(0, color.redComponent)) * 255).rounded())
+        green = UInt8((min(1, max(0, color.greenComponent)) * 255).rounded())
+        blue = UInt8((min(1, max(0, color.blueComponent)) * 255).rounded())
+    }
+}
+
 @MainActor
 final class AppDimmingManager: NSObject, ObservableObject {
     private static let rulesKey = "omnikit.appDimming.rules"
     private static let enabledKey = "omnikit.appDimming.isEnabled"
     private static let effectKey = "omnikit.appDimming.effect"
+    private static let maskColorKey = "omnikit.appDimming.maskColor"
     private let store: OmniKitStore
 
     @Published private(set) var rules: [AppDimmingRule]
     @Published private(set) var needsScreenRecording = false
     @Published private(set) var transparencyStatus = ""
+    @Published var maskColor: AppDimmingColor {
+        didSet {
+            guard oldValue != maskColor else { return }
+            if let data = try? JSONEncoder().encode(maskColor) {
+                store.set(data, forKey: Self.maskColorKey)
+            }
+            if effect == .dimming {
+                for overlay in overlays.values { overlay.backgroundColor = maskColor.nsColor }
+            }
+        }
+    }
     @Published var effect: AppDisplayEffect {
         didSet {
             guard oldValue != effect else { return }
@@ -74,6 +111,11 @@ final class AppDimmingManager: NSObject, ObservableObject {
         }
         isEnabled = store.object(forKey: Self.enabledKey) as? Bool ?? true
         effect = AppDisplayEffect(rawValue: store.string(forKey: Self.effectKey) ?? "") ?? .dimming
+        if let data = store.data(forKey: Self.maskColorKey), let color = try? JSONDecoder().decode(AppDimmingColor.self, from: data) {
+            maskColor = color
+        } else {
+            maskColor = .white
+        }
         super.init()
         terminationObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
@@ -234,6 +276,7 @@ final class AppDimmingManager: NSObject, ObservableObject {
                 overlay = existing
             } else {
                 overlay = DimmingWindow(contentRect: appKitFrame)
+                overlay.backgroundColor = maskColor.nsColor
                 overlays[id] = overlay
             }
             if overlay.frame != appKitFrame {
