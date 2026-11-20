@@ -10,13 +10,21 @@ import UniformTypeIdentifiers
 struct AppDimmingConfigView: View {
     @EnvironmentObject private var appDimmingManager: AppDimmingManager
     @State private var selectionMessage = ""
+    private let colorPresets: [(name: String, color: AppDimmingColor)] = [
+        ("白色", .white),
+        ("黑色", AppDimmingColor(red: 0, green: 0, blue: 0)),
+        ("灰色", AppDimmingColor(red: 128, green: 128, blue: 128)),
+        ("蓝色", AppDimmingColor(red: 80, green: 140, blue: 220)),
+        ("绿色", AppDimmingColor(red: 100, green: 170, blue: 130)),
+        ("暖黄", AppDimmingColor(red: 245, green: 220, blue: 160))
+    ]
 
     var body: some View {
         SettingsCanvas {
             SettingsHeroCard(
                 title: "软件淡化",
                 subtitle: appDimmingManager.effect == .dimming
-                    ? "为选定软件的窗口添加白色遮罩，文字和图片会一起变淡，也会同时降低自己与旁人的可读性。仅支持普通桌面窗口，不支持全屏。"
+                    ? "为选定软件的窗口添加颜色遮罩，文字和图片会一起变淡，也会同时降低自己与旁人的可读性。仅支持普通桌面窗口，不支持全屏。"
                     : "透明效果会实时显示窗口后方画面，需要屏幕录制权限。仅支持单屏普通窗口，不支持全屏；重叠窗口可能显示不准确。"
             ) {
                 Image(systemName: "rectangle.on.rectangle")
@@ -25,7 +33,7 @@ struct AppDimmingConfigView: View {
             }
 
             SettingsSection(title: "淡化设置") {
-                SettingsRow("显示效果", systemImage: "circle.lefthalf.filled", description: "淡化使用白色遮罩；透明显示后方画面。") {
+                SettingsRow("显示效果", systemImage: "circle.lefthalf.filled", description: "淡化使用颜色遮罩；透明显示后方画面。") {
                     Picker("显示效果", selection: $appDimmingManager.effect) {
                         ForEach(AppDisplayEffect.allCases) { effect in
                             Text(effect.title).tag(effect)
@@ -34,6 +42,32 @@ struct AppDimmingConfigView: View {
                     .pickerStyle(.segmented)
                     .labelsHidden()
                     .frame(width: 150)
+                }
+                if appDimmingManager.effect == .dimming {
+                    SettingsDivider()
+                    SettingsRow("遮罩颜色", systemImage: "paintpalette", description: String(format: "所有软件共用 · #%02X%02X%02X", appDimmingManager.maskColor.red, appDimmingManager.maskColor.green, appDimmingManager.maskColor.blue)) {
+                        HStack(spacing: 7) {
+                            ForEach(colorPresets, id: \.name) { preset in
+                                Button {
+                                    appDimmingManager.maskColor = preset.color
+                                } label: {
+                                    Circle()
+                                        .fill(Color(nsColor: preset.color.nsColor))
+                                        .frame(width: 22, height: 22)
+                                        .overlay(Circle().strokeBorder(appDimmingManager.maskColor == preset.color ? Color.accentColor : Color.gray.opacity(0.45), lineWidth: appDimmingManager.maskColor == preset.color ? 2 : 1))
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(preset.name)
+                            }
+                            ColorPicker("自定义", selection: Binding(
+                                get: { Color(nsColor: appDimmingManager.maskColor.nsColor) },
+                                set: { color in
+                                    if let value = AppDimmingColor(nsColor: NSColor(color)) { appDimmingManager.maskColor = value }
+                                }
+                            ), supportsOpacity: false)
+                            .fixedSize()
+                        }
+                    }
                 }
                 SettingsDivider()
                 SettingsRow("启用软件淡化", systemImage: "circle.lefthalf.filled", description: "关闭后立即移除所有遮罩，保留软件设置。") {

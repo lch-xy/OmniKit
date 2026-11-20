@@ -124,11 +124,7 @@ final class MenuBarFolderController: NSObject, ObservableObject {
         chevronItem = chevron
         applyCollapsedState(false)
 
-        Timer.publish(every: 1, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in self?.checkForChanges() }
-            .store(in: &monitoring)
-        // 通知只触发核验；图标位置正确时保持折叠，延迟创建的图标由定时检查兜底。
+        // 通知只触发核验；图标位置正确时保持折叠。
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
             NSWorkspace.shared.notificationCenter.publisher(for: name)
                 .receive(on: DispatchQueue.main)
